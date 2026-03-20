@@ -17,6 +17,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+st.set_option("client.toolbarMode", "viewer")
 
 
 # ------------------------------------------------------
@@ -37,6 +38,7 @@ LOCATION_COLOURS = {
     "High Bickington": "#499823",
     "Whitminster": "#86d5f8",
     "Malmesbury": "#f59e0b",
+    "Aylesbeare": "#e11d48",
 }
 
 # Per-location series colour maps (used in individual mode)
@@ -55,6 +57,11 @@ SERIES_COLOUR_MAPS = {
     },
     "Malmesbury": {
         "Flow (Kscmh)": PRIMARY_COLOUR,
+    },
+    "Aylesbeare": {
+        "Aylesbeare F1 mcm/d": PRIMARY_COLOUR,
+        "Aylesbeare IP Inferred mcm/d": SECONDARY_COLOUR,
+        "Aylesbeare IP Inferred Kscmh": ACCENT_COLOUR,
     },
 }
 
@@ -102,6 +109,16 @@ LOCATIONS = {
         "flow_unit": "Kscmh",
         "has_pressure": False,
         "description": "Flow · Wiltshire (to 2023)",
+    },
+    "Aylesbeare": {
+        "file": "Aylesbeare_cleaned.parquet",
+        "lat": 50.72,
+        "lon": -3.29,
+        "compare_col": "Aylesbeare IP Inferred Kscmh",
+        "compare_scale": 1.0,
+        "flow_unit": "Kscmh",
+        "has_pressure": False,
+        "description": "Flow · Devon (inferred + F1)",
     },
 }
 
@@ -224,6 +241,17 @@ st.markdown(
         margin-bottom: 1.1rem;
         box-sizing: border-box;
     }}
+    .stPlotlyChart .js-plotly-plot .plotly .modebar {{
+        right: 2.8rem !important;
+    }}
+    div[data-testid="stElementContainer"] > div[data-testid="stElementToolbar"] {{
+        top: 0.35rem !important;
+        right: 0.45rem !important;
+        z-index: 30 !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        pointer-events: auto !important;
+    }}
     .hero-banner {{
         display: flex;
         justify-content: space-between;
@@ -292,7 +320,7 @@ st.markdown(
 # ======================================================
 # DATA LOADING
 # ======================================================
-@st.cache_data
+@st.cache_data(max_entries=1)
 def load_location(name):
     meta = LOCATIONS[name]
     df_local = pd.read_parquet(meta["file"])
@@ -305,7 +333,27 @@ def load_location(name):
         else:
             df_local.index = pd.to_datetime(df_local.index, utc=True)
     df_local = df_local.sort_index()
+    float_cols = df_local.select_dtypes(include=["float64"]).columns
+    if len(float_cols) > 0:
+        df_local[float_cols] = df_local[float_cols].astype("float32")
     return df_local
+
+
+@st.cache_data
+def load_compare_series(name):
+    """Load only one representative flow series per location (Kscmh)."""
+    meta = LOCATIONS[name]
+    df_small = pd.read_parquet(meta["file"], columns=[meta["compare_col"]])
+    if not isinstance(df_small.index, pd.DatetimeIndex):
+        for col in ["Time", "Datetime", "timestamp"]:
+            if col in df_small.columns:
+                df_small[col] = pd.to_datetime(df_small[col], utc=True)
+                df_small = df_small.set_index(col)
+                break
+        else:
+            df_small.index = pd.to_datetime(df_small.index, utc=True)
+    series = (df_small[meta["compare_col"]] * meta["compare_scale"]).astype("float32")
+    return series.sort_index()
 
 
 @st.cache_data
@@ -313,13 +361,36 @@ def build_comparison_df():
     """Build a single DataFrame with one flow column per location, all in Kscmh."""
     frames = {}
     for name, meta in LOCATIONS.items():
-        raw = load_location(name)
-        series = raw[meta["compare_col"]] * meta["compare_scale"]
-        frames[name] = series
-    return pd.DataFrame(frames)
+        frames[name] = load_compare_series(name)
+    return pd.DataFrame(frames).astype("float32")
 
 
-all_data = {name: load_location(name) for name in LOCATIONS}
+def get_location_cache_signature():
+    """Track metadata changes so Streamlit caches refresh when sites are added or updated."""
+    return tuple(
+        (
+            name,
+            meta["file"],
+            meta["compare_col"],
+            meta["compare_scale"],
+            meta["flow_unit"],
+        )
+        for name, meta in LOCATIONS.items()
+    )
+
+
+def refresh_location_caches():
+    current_signature = get_location_cache_signature()
+    if st.session_state.get("_location_cache_signature") == current_signature:
+        return
+
+    load_location.clear()
+    load_compare_series.clear()
+    build_comparison_df.clear()
+    st.session_state["_location_cache_signature"] = current_signature
+
+
+refresh_location_caches()
 compare_df_full = build_comparison_df()
 
 
@@ -347,10 +418,10 @@ st.sidebar.markdown("---")
 # SIDEBAR – DATE RANGE (context-dependent)
 # ======================================================
 if is_compare:
-    global_min = min(d.index.min().date() for d in all_data.values())
-    global_max = max(d.index.max().date() for d in all_data.values())
+    global_min = compare_df_full.index.min().date()
+    global_max = compare_df_full.index.max().date()
 else:
-    loc_df_raw = all_data[view_mode]
+    loc_df_raw = load_location(view_mode)
     global_min = loc_df_raw.index.min().date()
     global_max = loc_df_raw.index.max().date()
 
@@ -372,12 +443,55 @@ def filter_by_date(dataframe, start, end):
     return dataframe.loc[mask]
 
 
+def thin_time_series(dataframe, max_points=50000):
+    """Downsample very dense trend charts to keep Plotly responsive."""
+    if len(dataframe) <= max_points:
+        return dataframe, 1
+    step = (len(dataframe) + max_points - 1) // max_points
+    return dataframe.iloc[::step], step
+
+
+def select_time_focus(dataframe, key_prefix):
+    """Simple period focus selector for trend charts."""
+    focus_mode = st.selectbox(
+        "Period to view",
+        options=["All selected dates", "One year", "One month", "One day"],
+        key=f"{key_prefix}_focus_mode",
+    )
+    if dataframe.empty or focus_mode == "All selected dates":
+        return dataframe, "Showing all selected dates."
+
+    years = sorted(dataframe.index.year.unique())
+    year = st.selectbox("Year", options=years, index=len(years) - 1, key=f"{key_prefix}_year")
+    year_df = dataframe[dataframe.index.year == year]
+    if focus_mode == "One year":
+        return year_df, f"Showing {year}."
+
+    month_opts = sorted(year_df.index.month.unique())
+    month = st.selectbox(
+        "Month",
+        options=month_opts,
+        format_func=lambda m: pd.Timestamp(year=2000, month=int(m), day=1).strftime("%B"),
+        key=f"{key_prefix}_month",
+    )
+    month_df = year_df[year_df.index.month == month]
+    month_name = pd.Timestamp(year=2000, month=int(month), day=1).strftime("%B")
+    if focus_mode == "One month":
+        return month_df, f"Showing {month_name} {year}."
+
+    day_opts = sorted(month_df.index.day.unique())
+    day = st.selectbox("Day", options=day_opts, key=f"{key_prefix}_day")
+    day_df = month_df[month_df.index.day == day]
+    return day_df, f"Showing {year}-{int(month):02d}-{int(day):02d}."
+
+
 if is_compare:
     compare_df = filter_by_date(compare_df_full, start_date, end_date).dropna(how="all")
-    # Also filter individual data for stats
-    filtered_data = {n: filter_by_date(d, start_date, end_date) for n, d in all_data.items()}
 else:
-    loc_df = filter_by_date(all_data[view_mode], start_date, end_date)
+    loc_df = filter_by_date(loc_df_raw, start_date, end_date)
+    if loc_df.empty:
+        st.warning("No data in the selected date range. Expand the date range to continue.")
+        st.stop()
     # Series selector for individual mode
     all_cols = list(loc_df.columns)
     selected_cols = st.sidebar.multiselect(
@@ -393,7 +507,7 @@ else:
 
 # Sidebar record count
 if is_compare:
-    total_recs = sum(len(d) for d in filtered_data.values())
+    total_recs = int(compare_df.notna().sum().sum())
     st.sidebar.markdown(
         f"<p style='color:{SUBTEXT_COL}; font-size:0.9rem;'>"
         f"Total records across all locations: "
@@ -489,10 +603,49 @@ def apply_dark_layout(fig, title):
 # HELPER: SPLIT FLOW / PRESSURE COLUMNS
 # ======================================================
 def split_series_columns(columns):
-    flow_cols = [c for c in columns if "flow" in c.lower()]
+    flow_cols = [
+        c
+        for c in columns
+        if any(token in c.lower() for token in ("flow", "scmh", "kscmh", "mcm/d"))
+    ]
     pressure_cols = [c for c in columns if "pressure" in c.lower()]
     other_cols = [c for c in columns if c not in flow_cols + pressure_cols]
     return flow_cols, pressure_cols, other_cols
+
+
+def is_native_scmh_series(col):
+    col_lower = col.lower()
+    return "scmh" in col_lower and "kscmh" not in col_lower
+
+
+def get_display_series_name(col, flow_unit):
+    if flow_unit == "kScmh" and is_native_scmh_series(col):
+        return col.replace("(Scmh)", "(kScmh)")
+    return col
+
+
+def get_display_series_values(series, col, flow_unit):
+    if flow_unit == "kScmh" and is_native_scmh_series(col):
+        return series / 1000.0
+    return series
+
+
+def get_flow_axis_label(flow_cols, flow_unit):
+    if not flow_cols:
+        return "Value"
+
+    col_lower = [c.lower() for c in flow_cols]
+    has_mcmd = any("mcm/d" in c for c in col_lower)
+    has_kscmh = any("kscmh" in c for c in col_lower)
+    has_scmh = any("scmh" in c and "kscmh" not in c for c in col_lower)
+
+    if has_mcmd and (has_kscmh or has_scmh):
+        return "Flow (mixed units)"
+    if has_mcmd:
+        return "Flow (mcm/d)"
+    if flow_unit == "kScmh":
+        return "Flow (kScmh)"
+    return f"Flow ({flow_unit})"
 
 
 # ======================================================
@@ -504,7 +657,7 @@ def build_stacked_line_chart(
     flow_cols, pressure_cols, other_cols = split_series_columns(plot_df.columns)
     has_two_rows = bool(flow_cols and pressure_cols)
     nrows = 2 if has_two_rows else 1
-    flow_scale = 1000.0 if flow_unit == "kScmh" else 1.0
+    flow_label = get_flow_axis_label(flow_cols, flow_unit)
 
     fig = make_subplots(rows=nrows, cols=1, shared_xaxes=True, vertical_spacing=0.08)
 
@@ -519,10 +672,9 @@ def build_stacked_line_chart(
             target_row = 2
 
         y_vals = plot_df[col]
-        trace_name = col
-        if col in flow_cols and flow_unit == "kScmh":
-            y_vals = y_vals / flow_scale
-            trace_name = col.replace("(Scmh)", "(kScmh)")
+        trace_name = get_display_series_name(col, flow_unit) if col in flow_cols else col
+        if col in flow_cols:
+            y_vals = get_display_series_values(y_vals, col, flow_unit)
 
         trace_kwargs = dict(
             x=plot_df.index,
@@ -538,12 +690,11 @@ def build_stacked_line_chart(
 
     fig.update_layout(xaxis_title=xaxis_title)
     if has_two_rows:
-        flow_label = "Flow (kScmh)" if flow_unit == "kScmh" else f"Flow ({flow_unit})"
         fig.update_yaxes(title_text=flow_label, row=1, col=1)
         fig.update_yaxes(title_text="Pressure (Bar)", row=2, col=1)
     else:
         if flow_cols:
-            label = "Flow (kScmh)" if flow_unit == "kScmh" else f"Flow ({flow_unit})"
+            label = flow_label
         elif pressure_cols:
             label = "Pressure (Bar)"
         else:
@@ -671,16 +822,13 @@ st.caption('Select a location from the sidebar to explore it individually, or st
 # FREQUENCY / RESOLUTION HELPERS
 # ======================================================
 FREQ_MAP = {
-    "30 minutes": "30min",
+    "1min": "1min",
+    "15min": "15min",
+    "30min": "30min",
     "Hourly": "H",
     "Daily": "D",
     "Weekly": "W",
-}
-ROLLING_WINDOW_MAP = {
-    "30 minutes": 48,
-    "Hourly": 24,
-    "Daily": 7,
-    "Weekly": 4,
+    "Monthly": "M",
 }
 
 
@@ -695,12 +843,15 @@ if is_compare:
     st.markdown("## Summary statistics")
     st.caption("One representative flow per location, all converted to Kscmh")
 
-    mcols = st.columns(4)
+    mcols = st.columns(len(LOCATIONS))
     for i, name in enumerate(LOCATIONS):
-        d = filtered_data[name]
+        d = compare_df[name].dropna() if name in compare_df.columns else pd.Series(dtype="float32")
         with mcols[i]:
             st.metric(name, f"{len(d):,} records")
-            st.caption(f"{d.index.min().date()} → {d.index.max().date()}")
+            if len(d) > 0:
+                st.caption(f"{d.index.min().date()} → {d.index.max().date()}")
+            else:
+                st.caption("No data in selected range")
 
     st.markdown("#### Descriptive statistics (flow in Kscmh)")
     desc = compare_df.describe().T
@@ -728,28 +879,30 @@ if is_compare:
 
     ctrl1, ctrl2 = st.columns(2)
     with ctrl1:
-        agg_choice = st.selectbox(
-            "Time resolution",
-            options=list(FREQ_MAP.keys()),
-            index=2,
-        )
+        trend_base, focus_caption = select_time_focus(compare_df, key_prefix="cmp_trend")
     with ctrl2:
-        smooth_trend = st.checkbox("Smooth trend", value=True)
+        agg_choice = st.selectbox(
+            "Data granularity",
+            options=list(FREQ_MAP.keys()),
+            index=list(FREQ_MAP.keys()).index("Daily"),
+        )
+    if trend_base.empty:
+        st.info("No data in this period. Pick a different year/month/day.")
+        st.stop()
 
-    resampled = compare_df.resample(FREQ_MAP[agg_choice]).mean()
-    if smooth_trend:
-        resampled = resampled.rolling(
-            window=ROLLING_WINDOW_MAP[agg_choice], min_periods=1
-        ).median()
+    resampled = trend_base.resample(FREQ_MAP[agg_choice]).mean().dropna(how="all")
+    raw_points = len(resampled)
+    resampled, thin_step = thin_time_series(resampled)
 
     fig_trend = build_comparison_chart(
         resampled,
         f"Flow Comparison – {agg_choice.lower()} averages",
         "Time",
     )
-    if smooth_trend:
+    st.caption(focus_caption)
+    if thin_step > 1:
         st.caption(
-            f"Smoothed with rolling median ({ROLLING_WINDOW_MAP[agg_choice]} points)."
+            f"To keep things fast, this chart shows {len(resampled):,} of {raw_points:,} points."
         )
     st.plotly_chart(fig_trend, use_container_width=True)
 
@@ -910,19 +1063,22 @@ else:
 
     ctrl_a, ctrl_b, ctrl_c = st.columns(3)
     with ctrl_a:
-        agg_choice = st.selectbox(
-            "Time resolution",
-            options=list(FREQ_MAP.keys()),
-            index=2,
-        )
+        trend_base, focus_caption = select_time_focus(loc_df, key_prefix=f"{view_mode}_trend")
     with ctrl_b:
+        agg_choice = st.selectbox(
+            "Data granularity",
+            options=list(FREQ_MAP.keys()),
+            index=list(FREQ_MAP.keys()).index("Daily"),
+        )
+    with ctrl_c:
         trend_view = st.selectbox(
             "Comparison view",
             options=["Separated (actual units)", "Normalized (0-1)"],
             index=0,
         )
-    with ctrl_c:
-        smooth_trend = st.checkbox("Smooth trend", value=True)
+    if trend_base.empty:
+        st.info("No data in this period. Pick a different year/month/day.")
+        st.stop()
 
     # Flow unit toggle only for Great Hele (Scmh native)
     flow_unit = loc_meta["flow_unit"]
@@ -935,19 +1091,17 @@ else:
         )
 
     freq = FREQ_MAP[agg_choice]
-    resampled = loc_df.resample(freq).mean()
+    resampled = trend_base.resample(freq).mean().dropna(how="all")
     plot_data = resampled.copy()
-    if smooth_trend:
-        plot_data = plot_data.rolling(
-            window=ROLLING_WINDOW_MAP[agg_choice], min_periods=1
-        ).median()
+    raw_points = len(plot_data)
+    plot_data, thin_step = thin_time_series(plot_data)
 
     flow_cols, pressure_cols, other_cols = split_series_columns(plot_data.columns)
 
     if trend_view == "Separated (actual units)":
-        flow_scale = 1000.0 if flow_unit == "kScmh" else 1.0
         has_two_rows = bool(flow_cols and pressure_cols)
         nrows = 2 if has_two_rows else 1
+        flow_label = get_flow_axis_label(flow_cols, flow_unit)
         fig_trend = make_subplots(
             rows=nrows, cols=1, shared_xaxes=True, vertical_spacing=0.06
         )
@@ -964,9 +1118,9 @@ else:
 
             y_vals = plot_data[col]
             trace_name = f"{col} ({agg_choice} avg)"
-            if col in flow_cols and flow_unit == "kScmh":
-                y_vals = y_vals / flow_scale
-                trace_name = f"{col.replace('(Scmh)', '(kScmh)')} ({agg_choice} avg)"
+            if col in flow_cols:
+                y_vals = get_display_series_values(y_vals, col, flow_unit)
+                trace_name = f"{get_display_series_name(col, flow_unit)} ({agg_choice} avg)"
 
             fig_trend.add_trace(
                 go.Scatter(
@@ -982,12 +1136,11 @@ else:
 
         fig_trend.update_layout(xaxis_title="Time")
         if has_two_rows:
-            flabel = f"Flow ({flow_unit})" if flow_cols else "Value"
-            fig_trend.update_yaxes(title_text=flabel, row=1, col=1)
+            fig_trend.update_yaxes(title_text=flow_label, row=1, col=1)
             fig_trend.update_yaxes(title_text="Pressure (Bar)", row=2, col=1)
         else:
             if flow_cols:
-                flabel = f"Flow ({flow_unit})"
+                flabel = flow_label
             elif pressure_cols:
                 flabel = "Pressure (Bar)"
             else:
@@ -1020,9 +1173,10 @@ else:
         )
         st.caption("Each series is scaled independently to 0-1 for shape comparison.")
 
-    if smooth_trend:
+    st.caption(focus_caption)
+    if thin_step > 1:
         st.caption(
-            f"Smoothed with rolling median ({ROLLING_WINDOW_MAP[agg_choice]} points)."
+            f"To keep things fast, this chart shows {len(plot_data):,} of {raw_points:,} points."
         )
     st.plotly_chart(fig_trend, use_container_width=True)
 
@@ -1106,13 +1260,12 @@ else:
     value_cols = [c for c in df_year.columns if c != "Year"]
     flow_yr, pressure_yr, other_yr = split_series_columns(value_cols)
 
-    flow_scale = 1000.0 if flow_unit == "kScmh" else 1.0
     first_group = flow_yr + other_yr
     if first_group:
         fig_box_f = go.Figure()
         for col in first_group:
-            y_vals = df_year[col] / flow_scale if col in flow_yr else df_year[col]
-            plot_name = col.replace("(Scmh)", f"({flow_unit})") if col in flow_yr else col
+            y_vals = get_display_series_values(df_year[col], col, flow_unit) if col in flow_yr else df_year[col]
+            plot_name = get_display_series_name(col, flow_unit) if col in flow_yr else col
             fig_box_f.add_trace(
                 go.Box(
                     x=df_year["Year"],
@@ -1123,7 +1276,7 @@ else:
                     boxpoints=False,
                 )
             )
-        ylab = f"Flow ({flow_unit})" if flow_yr else "Value"
+        ylab = get_flow_axis_label(flow_yr, flow_unit) if flow_yr else "Value"
         fig_box_f.update_layout(xaxis_title="Year", yaxis_title=ylab)
         fig_box_f = apply_dark_layout(
             fig_box_f, "Flow Distribution by Year" if flow_yr else "Distribution by Year"
