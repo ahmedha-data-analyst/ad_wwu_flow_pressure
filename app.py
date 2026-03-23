@@ -1,4 +1,5 @@
 import base64
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -34,35 +35,47 @@ SUBTEXT_COL = LIGHT_GREY
 ACCENT_COLOUR = "#86d5f8"
 
 LOCATION_COLOURS = {
-    "Great Hele": "#a7d730",
-    "High Bickington": "#499823",
-    "Whitminster": "#86d5f8",
-    "Malmesbury": "#f59e0b",
-    "Aylesbeare": "#e11d48",
+    "Great Hele": "#9bc53d",
+    "High Bickington": "#2f855a",
+    "Whitminster": "#4ea8de",
+    "Malmesbury": "#f77f00",
+    "Aylesbeare": "#d7263d",
+    "Enfield & Charlton": "#7c3aed",
 }
 
 # Per-location series colour maps (used in individual mode)
 SERIES_COLOUR_MAPS = {
     "Great Hele": {
-        "Flow (Scmh)": PRIMARY_COLOUR,
-        "Pressure (Bar)": ACCENT_COLOUR,
+        "Flow (Scmh)": "#9bc53d",
+        "Pressure (Bar)": "#c5e67a",
     },
     "High Bickington": {
-        "Flow (Kscmh) F1": PRIMARY_COLOUR,
-        "Flow (Kscmh) F2": SECONDARY_COLOUR,
-        "Flow (Kscmh) F3": ACCENT_COLOUR,
+        "Flow (Kscmh) F1": "#14532d",
+        "Flow (Kscmh) F2": "#22c55e",
+        "Flow (Kscmh) F3": "#a3e635",
     },
     "Whitminster": {
-        "Flow (Kscmh)": PRIMARY_COLOUR,
+        "Flow (Kscmh)": "#4ea8de",
     },
     "Malmesbury": {
-        "Flow (Kscmh)": PRIMARY_COLOUR,
+        "Flow (Kscmh)": "#f77f00",
     },
     "Aylesbeare": {
-        "Aylesbeare F1 mcm/d": PRIMARY_COLOUR,
-        "Aylesbeare IP Inferred mcm/d": SECONDARY_COLOUR,
-        "Aylesbeare IP Inferred Kscmh": ACCENT_COLOUR,
+        "Aylesbeare F1 mcm/d": "#8f1d2c",
+        "Aylesbeare IP Inferred mcm/d": "#d7263d",
+        "Aylesbeare IP Inferred Kscmh": "#f26a7c",
     },
+    "Enfield & Charlton": {
+        "Enfield flow (F1)": "#5b21b6",
+        "Charlton flow (F1)": "#8b5cf6",
+        "Enfield outlet (IP1)": "#38bdf8",
+        "Charlton outlet (MP1)": "#a5f3fc",
+    },
+}
+
+SERIES_DISPLAY_NAMES = {
+    "Enfield outlet (IP1)": "Enfield outlet pressure (IP1)",
+    "Charlton outlet (MP1)": "Charlton outlet pressure (MP1)",
 }
 
 
@@ -119,6 +132,16 @@ LOCATIONS = {
         "flow_unit": "Kscmh",
         "has_pressure": False,
         "description": "Flow · Devon (inferred + F1)",
+    },
+    "Enfield & Charlton": {
+        "file": "enfield_charlton_cleaned.parquet",
+        "lat": 51.60,
+        "lon": -2.16,
+        "compare_col": "Enfield flow (F1)",
+        "compare_scale": 1 / 1000,  # Scmh → Kscmh
+        "flow_unit": "Scmh",
+        "has_pressure": True,
+        "description": "Flows & outlet pressures",
     },
 }
 
@@ -498,6 +521,7 @@ else:
         "Select series",
         options=all_cols,
         default=all_cols,
+        format_func=lambda col: SERIES_DISPLAY_NAMES.get(col, col),
     )
     if not selected_cols:
         st.sidebar.error("Please select at least one series.")
@@ -575,7 +599,7 @@ def apply_dark_layout(fig, title):
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
         font=dict(color=TEXT_COL, family="Hind, sans-serif"),
-        colorway=[PRIMARY_COLOUR, SECONDARY_COLOUR, ACCENT_COLOUR, "#f59e0b", "#e11d48"],
+        colorway=list(LOCATION_COLOURS.values()),
         legend=dict(
             bgcolor="rgba(0,0,0,0)",
             orientation="h",
@@ -608,7 +632,7 @@ def split_series_columns(columns):
         for c in columns
         if any(token in c.lower() for token in ("flow", "scmh", "kscmh", "mcm/d"))
     ]
-    pressure_cols = [c for c in columns if "pressure" in c.lower()]
+    pressure_cols = [c for c in columns if "pressure" in c.lower() or "outlet" in c.lower()]
     other_cols = [c for c in columns if c not in flow_cols + pressure_cols]
     return flow_cols, pressure_cols, other_cols
 
@@ -619,9 +643,10 @@ def is_native_scmh_series(col):
 
 
 def get_display_series_name(col, flow_unit):
+    display_name = SERIES_DISPLAY_NAMES.get(col, col)
     if flow_unit == "kScmh" and is_native_scmh_series(col):
-        return col.replace("(Scmh)", "(kScmh)")
-    return col
+        display_name = display_name.replace("(Scmh)", "(kScmh)")
+    return display_name
 
 
 def get_display_series_values(series, col, flow_unit):
@@ -648,6 +673,113 @@ def get_flow_axis_label(flow_cols, flow_unit):
     return f"Flow ({flow_unit})"
 
 
+def get_series_axis_label(col, flow_unit):
+    col_lower = col.lower()
+    if "pressure" in col_lower or "outlet" in col_lower:
+        return "Pressure (Bar)"
+    if "mcm/d" in col_lower:
+        return "Flow (mcm/d)"
+    if "kscmh" in col_lower:
+        return "Flow (Kscmh)"
+    if is_native_scmh_series(col):
+        return "Flow (kScmh)" if flow_unit == "kScmh" else "Flow (Scmh)"
+    if "flow" in col_lower:
+        return f"Flow ({flow_unit})"
+    return "Value"
+
+
+def build_yearly_box_plot(df_year, selected_col, title, colour, flow_unit="Kscmh"):
+    plot_name = get_display_series_name(selected_col, flow_unit)
+    y_vals = get_display_series_values(df_year[selected_col], selected_col, flow_unit)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Box(
+            x=df_year["Year"],
+            y=y_vals,
+            name=plot_name,
+            marker_color=colour,
+            boxmean=True,
+            boxpoints=False,
+        )
+    )
+    fig.update_layout(
+        xaxis_title="Year",
+        yaxis_title=get_series_axis_label(selected_col, flow_unit),
+    )
+    return apply_dark_layout(fig, title)
+
+
+def build_descriptive_stats(df):
+    desc = df.describe().T
+    if "50%" in desc.columns:
+        desc.insert(2, "median", desc.pop("50%"))
+    return desc
+
+
+def show_head_tail_dataframe(df, head_rows=100, tail_rows=100):
+    st.caption(f"First {head_rows} rows")
+    st.dataframe(df.head(head_rows), use_container_width=True)
+    st.caption(f"Last {tail_rows} rows")
+    st.dataframe(df.tail(tail_rows), use_container_width=True)
+
+
+def hex_to_rgb(colour):
+    colour = colour.lstrip("#")
+    return tuple(int(colour[i : i + 2], 16) for i in (0, 2, 4))
+
+
+def rgb_to_hex(rgb):
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
+def blend_hex(colour_a, colour_b, amount):
+    rgb_a = hex_to_rgb(colour_a)
+    rgb_b = hex_to_rgb(colour_b)
+    blended = tuple(
+        round((1 - amount) * channel_a + amount * channel_b)
+        for channel_a, channel_b in zip(rgb_a, rgb_b)
+    )
+    return rgb_to_hex(blended)
+
+
+def get_location_correlation_scale(base_colour):
+    negative_base = "#7cc7ff"
+    zero_base = blend_hex(PANEL_BG, TEXT_COL, 0.06)
+    positive_mid = blend_hex(base_colour, BACKGROUND, 0.34)
+    positive_high = blend_hex(base_colour, TEXT_COL, 0.12)
+    return [
+        [0.0, blend_hex(negative_base, BACKGROUND, 0.24)],
+        [0.5, zero_base],
+        [0.75, positive_mid],
+        [1.0, positive_high],
+    ]
+
+
+def build_correlation_heatmap(corr_df, title, base_colour=None):
+    color_scale = (
+        get_location_correlation_scale(base_colour)
+        if base_colour
+        else [
+            [0.0, ACCENT_COLOUR],
+            [0.5, PANEL_BG],
+            [1.0, PRIMARY_COLOUR],
+        ]
+    )
+    fig = px.imshow(
+        corr_df,
+        text_auto=True,
+        color_continuous_scale=color_scale,
+        zmin=-1,
+        zmax=1,
+        aspect="auto",
+    )
+    fig.update_layout(xaxis_title="", yaxis_title="")
+    fig = apply_dark_layout(fig, title)
+    fig.update_coloraxes(colorbar_title="Correlation")
+    return fig
+
+
 # ======================================================
 # HELPER: BUILD STACKED LINE CHART (individual mode)
 # ======================================================
@@ -658,11 +790,12 @@ def build_stacked_line_chart(
     has_two_rows = bool(flow_cols and pressure_cols)
     nrows = 2 if has_two_rows else 1
     flow_label = get_flow_axis_label(flow_cols, flow_unit)
+    default_colour = get_colour_fallback(colour_map)
 
     fig = make_subplots(rows=nrows, cols=1, shared_xaxes=True, vertical_spacing=0.08)
 
     for col in plot_df.columns:
-        base_col = colour_map.get(col, "#6366f1")
+        base_col = colour_map.get(col, default_colour)
         line_style = dict(color=base_col, width=2.4)
         if col in other_cols:
             line_style["dash"] = "dot"
@@ -672,7 +805,7 @@ def build_stacked_line_chart(
             target_row = 2
 
         y_vals = plot_df[col]
-        trace_name = get_display_series_name(col, flow_unit) if col in flow_cols else col
+        trace_name = get_display_series_name(col, flow_unit)
         if col in flow_cols:
             y_vals = get_display_series_values(y_vals, col, flow_unit)
 
@@ -729,15 +862,105 @@ def build_comparison_chart(plot_df, title, xaxis_title, mode="lines", marker_siz
     return apply_dark_layout(fig, title)
 
 
+def get_colour_fallback(colour_map, default="#6366f1"):
+    return next(iter(colour_map.values()), default)
+
+
+def chunk_list(items, size):
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def get_map_distance_km(lat_a, lon_a, lat_b, lon_b):
+    mean_lat = math.radians((lat_a + lat_b) / 2)
+    dx = (lon_b - lon_a) * 111.32 * math.cos(mean_lat)
+    dy = (lat_b - lat_a) * 110.57
+    return math.hypot(dx, dy)
+
+
+def get_text_anchor(lat_offset, lon_offset):
+    if abs(lat_offset) < 1e-6:
+        return "middle right" if lon_offset >= 0 else "middle left"
+    if abs(lon_offset) < 1e-6:
+        return "top center" if lat_offset >= 0 else "bottom center"
+    if lat_offset >= 0 and lon_offset >= 0:
+        return "top right"
+    if lat_offset >= 0 and lon_offset < 0:
+        return "top left"
+    if lat_offset < 0 and lon_offset >= 0:
+        return "bottom right"
+    return "bottom left"
+
+
+def get_map_display_points(locations, cluster_threshold_km=8.0, spread_radius_km=7.0):
+    points = [
+        {
+            "name": name,
+            "lat": meta["lat"],
+            "lon": meta["lon"],
+            "description": meta["description"],
+        }
+        for name, meta in locations.items()
+    ]
+
+    clusters = []
+    visited = set()
+    for idx in range(len(points)):
+        if idx in visited:
+            continue
+        stack = [idx]
+        cluster = []
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            cluster.append(current)
+            for other in range(len(points)):
+                if other in visited or other == current:
+                    continue
+                if get_map_distance_km(
+                    points[current]["lat"],
+                    points[current]["lon"],
+                    points[other]["lat"],
+                    points[other]["lon"],
+                ) <= cluster_threshold_km:
+                    stack.append(other)
+        clusters.append(sorted(cluster, key=lambda i: points[i]["name"]))
+
+    for cluster in clusters:
+        if len(cluster) == 1:
+            points[cluster[0]]["display_lat"] = points[cluster[0]]["lat"]
+            points[cluster[0]]["display_lon"] = points[cluster[0]]["lon"]
+            points[cluster[0]]["textposition"] = "top center"
+            continue
+
+        center_lat = sum(points[i]["lat"] for i in cluster) / len(cluster)
+        center_lon = sum(points[i]["lon"] for i in cluster) / len(cluster)
+        lon_scale = max(111.32 * math.cos(math.radians(center_lat)), 1e-6)
+        radius_km = spread_radius_km + 1.2 * max(len(cluster) - 2, 0)
+        start_angle = -math.pi / 4 if len(cluster) == 2 else -math.pi / 2
+
+        for offset_idx, point_idx in enumerate(cluster):
+            angle = start_angle + (2 * math.pi * offset_idx / len(cluster))
+            lat_offset = (radius_km / 110.57) * math.sin(angle)
+            lon_offset = (radius_km / lon_scale) * math.cos(angle)
+            points[point_idx]["display_lat"] = center_lat + lat_offset
+            points[point_idx]["display_lon"] = center_lon + lon_offset
+            points[point_idx]["textposition"] = get_text_anchor(lat_offset, lon_offset)
+
+    return points
+
+
 # ======================================================
 # MAP
 # ======================================================
 st.markdown("## Network locations")
 
-map_lats = [m["lat"] for m in LOCATIONS.values()]
-map_lons = [m["lon"] for m in LOCATIONS.values()]
-map_names = list(LOCATIONS.keys())
-map_descs = [m["description"] for m in LOCATIONS.values()]
+map_points = get_map_display_points(LOCATIONS)
+map_lats = [p["display_lat"] for p in map_points]
+map_lons = [p["display_lon"] for p in map_points]
+map_names = [p["name"] for p in map_points]
+map_descs = [p["description"] for p in map_points]
 map_colours = [LOCATION_COLOURS[n] for n in map_names]
 map_active = [is_compare or n == view_mode for n in map_names]
 map_sizes = [28 if active else 16 for active in map_active]
@@ -748,16 +971,6 @@ map_ring_opacity = [0.95 if active else 0.70 for active in map_active]
 map_opacities = [0.98 if active else 0.55 for active in map_active]
 
 fig_map = go.Figure()
-fig_map.add_trace(
-    go.Scattermapbox(
-        lat=map_lats,
-        lon=map_lons,
-        mode="lines",
-        line=dict(color="rgba(167, 215, 48, 0.42)", width=2.2),
-        hoverinfo="skip",
-        showlegend=False,
-    )
-)
 fig_map.add_trace(
     go.Scattermapbox(
         lat=map_lats,
@@ -786,27 +999,38 @@ fig_map.add_trace(
     go.Scattermapbox(
         lat=map_lats,
         lon=map_lons,
-        mode="markers+text",
+        mode="markers",
         marker=dict(
             size=map_sizes,
             color=map_colours,
             opacity=map_opacities,
         ),
-        text=map_names,
-        textposition="top center",
-        textfont=dict(size=13, color=TEXT_COL, family="Hind, sans-serif"),
         customdata=map_descs,
+        text=map_names,
         hovertemplate="<b>%{text}</b><br>%{customdata}<extra></extra>",
         showlegend=False,
     )
 )
+for point in map_points:
+    fig_map.add_trace(
+        go.Scattermapbox(
+            lat=[point["display_lat"]],
+            lon=[point["display_lon"]],
+            mode="text",
+            text=[point["name"]],
+            textposition=point["textposition"],
+            textfont=dict(size=13, color=TEXT_COL, family="Hind, sans-serif"),
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
 fig_map.update_layout(
     mapbox=dict(
         style="carto-positron",
         center=dict(lat=51.3, lon=-3.0),
         zoom=6.6,
-        pitch=20,
-        bearing=8,
+        pitch=0,
+        bearing=0,
     ),
     margin=dict(l=0, r=0, t=0, b=0),
     height=420,
@@ -843,27 +1067,28 @@ if is_compare:
     st.markdown("## Summary statistics")
     st.caption("One representative flow per location, all converted to Kscmh")
 
-    mcols = st.columns(len(LOCATIONS))
-    for i, name in enumerate(LOCATIONS):
-        d = compare_df[name].dropna() if name in compare_df.columns else pd.Series(dtype="float32")
-        with mcols[i]:
-            st.metric(name, f"{len(d):,} records")
-            if len(d) > 0:
-                st.caption(f"{d.index.min().date()} → {d.index.max().date()}")
-            else:
-                st.caption("No data in selected range")
+    for row_names in chunk_list(list(LOCATIONS.keys()), 3):
+        mcols = st.columns(3)
+        for col_idx, name in enumerate(row_names):
+            d = compare_df[name].dropna() if name in compare_df.columns else pd.Series(dtype="float32")
+            with mcols[col_idx]:
+                st.metric(name, f"{len(d):,} records")
+                if len(d) > 0:
+                    st.caption(f"{d.index.min().date()} → {d.index.max().date()}")
+                else:
+                    st.caption("No data in selected range")
 
     st.markdown("#### Descriptive statistics (flow in Kscmh)")
-    desc = compare_df.describe().T
+    desc = build_descriptive_stats(compare_df)
     st.dataframe(
         desc.style.format(
             {
                 "count": "{:,.0f}",
                 "mean": "{:,.4f}",
+                "median": "{:,.4f}",
                 "std": "{:,.4f}",
                 "min": "{:,.4f}",
                 "25%": "{:,.4f}",
-                "50%": "{:,.4f}",
                 "75%": "{:,.4f}",
                 "max": "{:,.4f}",
             }
@@ -877,9 +1102,19 @@ if is_compare:
     # --------------------------------------------------
     st.markdown("## Trend over time")
 
-    ctrl1, ctrl2 = st.columns(2)
+    ctrl1, ctrl2, ctrl3 = st.columns(3)
+    with ctrl3:
+        trend_location = st.selectbox(
+            "Location to show",
+            options=["All locations"] + list(LOCATIONS.keys()),
+            index=0,
+            key="compare_trend_location",
+        )
+    trend_source = (
+        compare_df if trend_location == "All locations" else compare_df[[trend_location]]
+    )
     with ctrl1:
-        trend_base, focus_caption = select_time_focus(compare_df, key_prefix="cmp_trend")
+        trend_base, focus_caption = select_time_focus(trend_source, key_prefix="cmp_trend")
     with ctrl2:
         agg_choice = st.selectbox(
             "Data granularity",
@@ -894,9 +1129,13 @@ if is_compare:
     raw_points = len(resampled)
     resampled, thin_step = thin_time_series(resampled)
 
+    trend_title = f"Flow Comparison – {agg_choice.lower()} averages"
+    if trend_location != "All locations":
+        trend_title = f"{trend_location} – {agg_choice.lower()} averages"
+
     fig_trend = build_comparison_chart(
         resampled,
-        f"Flow Comparison – {agg_choice.lower()} averages",
+        trend_title,
         "Time",
     )
     st.caption(focus_caption)
@@ -968,22 +1207,18 @@ if is_compare:
     daily_box = compare_df.resample("D").mean()
     daily_box["Year"] = daily_box.index.year
 
-    fig_box = go.Figure()
-    for name in LOCATIONS:
-        if name not in daily_box.columns:
-            continue
-        fig_box.add_trace(
-            go.Box(
-                x=daily_box["Year"],
-                y=daily_box[name],
-                name=name,
-                marker_color=LOCATION_COLOURS[name],
-                boxmean=True,
-                boxpoints=False,
-            )
-        )
-    fig_box.update_layout(xaxis_title="Year", yaxis_title="Flow (Kscmh)")
-    fig_box = apply_dark_layout(fig_box, "Daily Flow Distribution by Year")
+    box_location = st.selectbox(
+        "Location to show",
+        options=list(LOCATIONS.keys()),
+        key="compare_box_location",
+    )
+    fig_box = build_yearly_box_plot(
+        daily_box,
+        box_location,
+        f"Daily Flow Distribution by Year – {box_location}",
+        LOCATION_COLOURS[box_location],
+        flow_unit="Kscmh",
+    )
     st.plotly_chart(fig_box, use_container_width=True)
 
     # --------------------------------------------------
@@ -992,25 +1227,14 @@ if is_compare:
     st.markdown("## Correlation between locations")
 
     corr = compare_df.corr()
-    fig_corr = px.imshow(
-        corr,
-        text_auto=True,
-        color_continuous_scale=[
-            [0.0, ACCENT_COLOUR],
-            [0.5, PANEL_BG],
-            [1.0, PRIMARY_COLOUR],
-        ],
-        aspect="auto",
-    )
-    fig_corr.update_layout(xaxis_title="", yaxis_title="")
-    fig_corr = apply_dark_layout(fig_corr, "Correlation Between Locations")
+    fig_corr = build_correlation_heatmap(corr, "Correlation Between Locations")
     st.plotly_chart(fig_corr, use_container_width=True)
 
     # --------------------------------------------------
     # Raw data
     # --------------------------------------------------
-    with st.expander("Show comparison data (first 500 rows)"):
-        st.dataframe(compare_df.head(500), use_container_width=True)
+    with st.expander("Show comparison data (first and last 100 rows)"):
+        show_head_tail_dataframe(compare_df)
 
 
 # ##########################################################################
@@ -1019,6 +1243,9 @@ if is_compare:
 else:
     loc_meta = LOCATIONS[view_mode]
     colour_map = SERIES_COLOUR_MAPS.get(view_mode, {})
+    default_colour = get_colour_fallback(
+        colour_map, LOCATION_COLOURS.get(view_mode, "#6366f1")
+    )
 
     # --------------------------------------------------
     # Summary statistics
@@ -1038,16 +1265,16 @@ else:
         st.metric("Total records (filtered)", f"{len(loc_df):,}")
 
     st.markdown("#### Descriptive statistics")
-    desc = loc_df.describe().T
+    desc = build_descriptive_stats(loc_df)
     st.dataframe(
         desc.style.format(
             {
                 "count": "{:,.0f}",
                 "mean": "{:,.4f}",
+                "median": "{:,.4f}",
                 "std": "{:,.4f}",
                 "min": "{:,.4f}",
                 "25%": "{:,.4f}",
-                "50%": "{:,.4f}",
                 "75%": "{:,.4f}",
                 "max": "{:,.4f}",
             }
@@ -1107,7 +1334,7 @@ else:
         )
 
         for col in plot_data.columns:
-            base_col = colour_map.get(col, "#6366f1")
+            base_col = colour_map.get(col, default_colour)
             line_style = dict(color=base_col, width=2.2)
             if col in other_cols:
                 line_style["dash"] = "dot"
@@ -1117,10 +1344,9 @@ else:
                 target_row = 2
 
             y_vals = plot_data[col]
-            trace_name = f"{col} ({agg_choice} avg)"
+            trace_name = f"{get_display_series_name(col, flow_unit)} ({agg_choice} avg)"
             if col in flow_cols:
                 y_vals = get_display_series_values(y_vals, col, flow_unit)
-                trace_name = f"{get_display_series_name(col, flow_unit)} ({agg_choice} avg)"
 
             fig_trend.add_trace(
                 go.Scatter(
@@ -1155,13 +1381,13 @@ else:
         normalized = ((plot_data - plot_data.min()) / span).fillna(0.0)
         fig_trend = go.Figure()
         for col in normalized.columns:
-            base_col = colour_map.get(col, "#6366f1")
+            base_col = colour_map.get(col, default_colour)
             fig_trend.add_trace(
                 go.Scatter(
                     x=normalized.index,
                     y=normalized[col],
                     mode="lines",
-                    name=f"{col} ({agg_choice} avg)",
+                    name=f"{get_display_series_name(col, flow_unit)} ({agg_choice} avg)",
                     line=dict(color=base_col, width=2.2),
                 )
             )
@@ -1258,47 +1484,20 @@ else:
     df_year = loc_df.resample("D").mean()
     df_year["Year"] = df_year.index.year
     value_cols = [c for c in df_year.columns if c != "Year"]
-    flow_yr, pressure_yr, other_yr = split_series_columns(value_cols)
-
-    first_group = flow_yr + other_yr
-    if first_group:
-        fig_box_f = go.Figure()
-        for col in first_group:
-            y_vals = get_display_series_values(df_year[col], col, flow_unit) if col in flow_yr else df_year[col]
-            plot_name = get_display_series_name(col, flow_unit) if col in flow_yr else col
-            fig_box_f.add_trace(
-                go.Box(
-                    x=df_year["Year"],
-                    y=y_vals,
-                    name=plot_name,
-                    marker_color=colour_map.get(col, "#6366f1"),
-                    boxmean=True,
-                    boxpoints=False,
-                )
-            )
-        ylab = get_flow_axis_label(flow_yr, flow_unit) if flow_yr else "Value"
-        fig_box_f.update_layout(xaxis_title="Year", yaxis_title=ylab)
-        fig_box_f = apply_dark_layout(
-            fig_box_f, "Flow Distribution by Year" if flow_yr else "Distribution by Year"
-        )
-        st.plotly_chart(fig_box_f, use_container_width=True)
-
-    if pressure_yr:
-        fig_box_p = go.Figure()
-        for col in pressure_yr:
-            fig_box_p.add_trace(
-                go.Box(
-                    x=df_year["Year"],
-                    y=df_year[col],
-                    name=col,
-                    marker_color=colour_map.get(col, "#6366f1"),
-                    boxmean=True,
-                    boxpoints=False,
-                )
-            )
-        fig_box_p.update_layout(xaxis_title="Year", yaxis_title="Pressure (Bar)")
-        fig_box_p = apply_dark_layout(fig_box_p, "Pressure Distribution by Year")
-        st.plotly_chart(fig_box_p, use_container_width=True)
+    selected_box_col = st.selectbox(
+        "Series to show",
+        options=value_cols,
+        format_func=lambda col: get_display_series_name(col, flow_unit),
+        key=f"{view_mode}_box_series",
+    )
+    fig_box = build_yearly_box_plot(
+        df_year,
+        selected_box_col,
+        f"{view_mode} – {get_display_series_name(selected_box_col, flow_unit)} Distribution by Year",
+        colour_map.get(selected_box_col, default_colour),
+        flow_unit=flow_unit,
+    )
+    st.plotly_chart(fig_box, use_container_width=True)
 
     # --------------------------------------------------
     # 7. Correlation heatmap
@@ -1307,22 +1506,15 @@ else:
         st.markdown("## Correlation between series")
 
         corr = loc_df.corr()
-        fig_corr = px.imshow(
+        fig_corr = build_correlation_heatmap(
             corr,
-            text_auto=True,
-            color_continuous_scale=[
-                [0.0, ACCENT_COLOUR],
-                [0.5, PANEL_BG],
-                [1.0, PRIMARY_COLOUR],
-            ],
-            aspect="auto",
+            "Correlation Between Series",
+            base_colour=LOCATION_COLOURS.get(view_mode),
         )
-        fig_corr.update_layout(xaxis_title="", yaxis_title="")
-        fig_corr = apply_dark_layout(fig_corr, "Correlation Between Series")
         st.plotly_chart(fig_corr, use_container_width=True)
 
     # --------------------------------------------------
     # Raw data
     # --------------------------------------------------
-    with st.expander("Show raw data (first 500 rows)"):
-        st.dataframe(loc_df.head(500), use_container_width=True)
+    with st.expander("Show raw data (first and last 100 rows)"):
+        show_head_tail_dataframe(loc_df)
