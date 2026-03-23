@@ -146,6 +146,55 @@ LOCATIONS = {
 }
 
 
+COMPARE_SERIES = {
+    "Great Hele": {
+        "file": LOCATIONS["Great Hele"]["file"],
+        "col": "Flow (Scmh)",
+        "scale": 1 / 1000,
+    },
+    "High Bickington": {
+        "file": LOCATIONS["High Bickington"]["file"],
+        "col": "Flow (Kscmh) F1",
+        "scale": 1.0,
+    },
+    "Whitminster": {
+        "file": LOCATIONS["Whitminster"]["file"],
+        "col": "Flow (Kscmh)",
+        "scale": 1.0,
+    },
+    "Malmesbury": {
+        "file": LOCATIONS["Malmesbury"]["file"],
+        "col": "Flow (Kscmh)",
+        "scale": 1.0,
+    },
+    "Aylesbeare": {
+        "file": LOCATIONS["Aylesbeare"]["file"],
+        "col": "Aylesbeare IP Inferred Kscmh",
+        "scale": 1.0,
+    },
+    "Enfield flow (F1)": {
+        "file": LOCATIONS["Enfield & Charlton"]["file"],
+        "col": "Enfield flow (F1)",
+        "scale": 1 / 1000,
+    },
+    "Charlton flow (F1)": {
+        "file": LOCATIONS["Enfield & Charlton"]["file"],
+        "col": "Charlton flow (F1)",
+        "scale": 1 / 1000,
+    },
+}
+
+COMPARE_SERIES_COLOURS = {
+    "Great Hele": LOCATION_COLOURS["Great Hele"],
+    "High Bickington": LOCATION_COLOURS["High Bickington"],
+    "Whitminster": LOCATION_COLOURS["Whitminster"],
+    "Malmesbury": LOCATION_COLOURS["Malmesbury"],
+    "Aylesbeare": LOCATION_COLOURS["Aylesbeare"],
+    "Enfield flow (F1)": "#5b21b6",
+    "Charlton flow (F1)": "#a78bfa",
+}
+
+
 # ------------------------------------------------------
 # GLOBAL CSS TO FORCE DARK UI
 # ------------------------------------------------------
@@ -364,9 +413,9 @@ def load_location(name):
 
 @st.cache_data
 def load_compare_series(name):
-    """Load only one representative flow series per location (Kscmh)."""
-    meta = LOCATIONS[name]
-    df_small = pd.read_parquet(meta["file"], columns=[meta["compare_col"]])
+    """Load one compare-mode flow series in Kscmh."""
+    meta = COMPARE_SERIES[name]
+    df_small = pd.read_parquet(meta["file"], columns=[meta["col"]])
     if not isinstance(df_small.index, pd.DatetimeIndex):
         for col in ["Time", "Datetime", "timestamp"]:
             if col in df_small.columns:
@@ -375,22 +424,22 @@ def load_compare_series(name):
                 break
         else:
             df_small.index = pd.to_datetime(df_small.index, utc=True)
-    series = (df_small[meta["compare_col"]] * meta["compare_scale"]).astype("float32")
+    series = (df_small[meta["col"]] * meta["scale"]).astype("float32")
     return series.sort_index()
 
 
 @st.cache_data
 def build_comparison_df():
-    """Build a single DataFrame with one flow column per location, all in Kscmh."""
+    """Build a single DataFrame with one compare series per column, all in Kscmh."""
     frames = {}
-    for name, meta in LOCATIONS.items():
+    for name in COMPARE_SERIES:
         frames[name] = load_compare_series(name)
     return pd.DataFrame(frames).astype("float32")
 
 
 def get_location_cache_signature():
     """Track metadata changes so Streamlit caches refresh when sites are added or updated."""
-    return tuple(
+    location_sig = tuple(
         (
             name,
             meta["file"],
@@ -400,6 +449,11 @@ def get_location_cache_signature():
         )
         for name, meta in LOCATIONS.items()
     )
+    compare_sig = tuple(
+        (name, meta["file"], meta["col"], meta["scale"])
+        for name, meta in COMPARE_SERIES.items()
+    )
+    return location_sig + compare_sig
 
 
 def refresh_location_caches():
@@ -426,7 +480,7 @@ def encode_logo_to_base64(path: Path):
 def get_compare_date_bounds():
     mins = []
     maxs = []
-    for name in LOCATIONS:
+    for name in COMPARE_SERIES:
         series = load_compare_series(name)
         mins.append(series.index.min())
         maxs.append(series.index.max())
@@ -489,7 +543,7 @@ def build_compare_summary_data(start, end):
     rows = []
     total_recs = 0
 
-    for name in LOCATIONS:
+    for name in COMPARE_SERIES:
         series = filter_by_date(load_compare_series(name), start, end).dropna()
         count = int(series.count())
         total_recs += count
@@ -497,7 +551,7 @@ def build_compare_summary_data(start, end):
         if count == 0:
             rows.append(
                 {
-                    "Location": name,
+                    "Series": name,
                     "count": 0,
                     "start": None,
                     "end": None,
@@ -515,7 +569,7 @@ def build_compare_summary_data(start, end):
         desc = series.describe()
         rows.append(
             {
-                "Location": name,
+                "Series": name,
                 "count": count,
                 "start": series.index.min().date(),
                 "end": series.index.max().date(),
@@ -529,14 +583,14 @@ def build_compare_summary_data(start, end):
             }
         )
 
-    summary_df = pd.DataFrame(rows).set_index("Location")
+    summary_df = pd.DataFrame(rows).set_index("Series")
     return total_recs, summary_df
 
 
 @st.cache_data(max_entries=16)
 def build_compare_resampled_df(freq, start, end):
     frames = {}
-    for name in LOCATIONS:
+    for name in COMPARE_SERIES:
         series = filter_by_date(load_compare_series(name), start, end)
         if freq != "1min":
             series = series.resample(freq).mean()
@@ -547,7 +601,7 @@ def build_compare_resampled_df(freq, start, end):
 @st.cache_data(max_entries=8)
 def build_compare_pattern_df(pattern, start, end):
     frames = {}
-    for name in LOCATIONS:
+    for name in COMPARE_SERIES:
         series = filter_by_date(load_compare_series(name), start, end).dropna()
         if pattern == "month":
             grouped = series.groupby(series.index.month).mean()
@@ -940,7 +994,7 @@ def build_stacked_line_chart(
 def build_comparison_chart(plot_df, title, xaxis_title, mode="lines", marker_size=7):
     fig = go.Figure()
     for col in plot_df.columns:
-        colour = LOCATION_COLOURS.get(col, "#6366f1")
+        colour = COMPARE_SERIES_COLOURS.get(col, LOCATION_COLOURS.get(col, "#6366f1"))
         trace_kwargs = dict(
             x=plot_df.index,
             y=plot_df[col],
@@ -1162,13 +1216,13 @@ if is_compare:
     # Summary statistics
     # --------------------------------------------------
     st.markdown("## Summary statistics")
-    st.caption("One representative flow per location, all converted to Kscmh")
+    st.caption("Comparable flow series across the network, all converted to Kscmh")
 
     compare_desc = compare_summary[
         ["count", "mean", "median", "std", "min", "25%", "75%", "max"]
     ]
 
-    for row_names in chunk_list(list(LOCATIONS.keys()), 3):
+    for row_names in chunk_list(list(COMPARE_SERIES.keys()), 3):
         mcols = st.columns(3)
         for col_idx, name in enumerate(row_names):
             site_summary = compare_summary.loc[name]
@@ -1211,7 +1265,7 @@ if is_compare:
             "Average by calendar month",
             "Average by hour of day",
             "Distribution of daily flow by year",
-            "Correlation between locations",
+            "Correlation between flow series",
             "Raw data",
         ],
         key="compare_section",
@@ -1226,8 +1280,8 @@ if is_compare:
         ctrl1, ctrl2, ctrl3 = st.columns(3)
         with ctrl3:
             trend_location = st.selectbox(
-                "Location to show",
-                options=["All locations"] + list(LOCATIONS.keys()),
+                "Series to show",
+                options=["All series"] + list(COMPARE_SERIES.keys()),
                 index=0,
                 key="compare_trend_location",
             )
@@ -1243,7 +1297,7 @@ if is_compare:
         )
         trend_source = (
             compare_trend_df
-            if trend_location == "All locations"
+            if trend_location == "All series"
             else compare_trend_df[[trend_location]]
         )
 
@@ -1259,7 +1313,7 @@ if is_compare:
         plot_data, thin_step = thin_time_series(trend_base)
 
         trend_title = f"Flow Comparison – {agg_choice.lower()} averages"
-        if trend_location != "All locations":
+        if trend_location != "All series":
             trend_title = f"{trend_location} – {agg_choice.lower()} averages"
 
         fig_trend = build_comparison_chart(
@@ -1322,24 +1376,26 @@ if is_compare:
         compare_daily_box = build_compare_resampled_df("D", start_date, end_date)
         compare_daily_box["Year"] = compare_daily_box.index.year
         box_location = st.selectbox(
-            "Location to show",
-            options=list(LOCATIONS.keys()),
+            "Series to show",
+            options=list(COMPARE_SERIES.keys()),
             key="compare_box_location",
         )
         fig_box = build_yearly_box_plot(
             compare_daily_box,
             box_location,
             f"Daily Flow Distribution by Year – {box_location}",
-            LOCATION_COLOURS[box_location],
+            COMPARE_SERIES_COLOURS.get(
+                box_location, LOCATION_COLOURS.get(box_location, "#6366f1")
+            ),
             flow_unit="Kscmh",
         )
         st.plotly_chart(fig_box, width="stretch")
 
-    elif compare_section == "Correlation between locations":
-        st.markdown("## Correlation between locations")
+    elif compare_section == "Correlation between flow series":
+        st.markdown("## Correlation between flow series")
         compare_corr = build_compare_resampled_df("D", start_date, end_date).corr()
-        st.caption("Computed from daily representative flow to keep compare mode responsive.")
-        fig_corr = build_correlation_heatmap(compare_corr, "Correlation Between Locations")
+        st.caption("Computed from daily mean flow series to keep compare mode responsive.")
+        fig_corr = build_correlation_heatmap(compare_corr, "Correlation Between Flow Series")
         st.plotly_chart(fig_corr, width="stretch")
 
     else:
