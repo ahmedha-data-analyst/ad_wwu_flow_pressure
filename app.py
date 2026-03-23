@@ -414,7 +414,7 @@ def refresh_location_caches():
 
 
 refresh_location_caches()
-compare_df_full = build_comparison_df()
+compare_df_full = None
 
 
 def encode_logo_to_base64(path: Path):
@@ -441,6 +441,7 @@ st.sidebar.markdown("---")
 # SIDEBAR – DATE RANGE (context-dependent)
 # ======================================================
 if is_compare:
+    compare_df_full = build_comparison_df()
     global_min = compare_df_full.index.min().date()
     global_max = compare_df_full.index.max().date()
 else:
@@ -462,8 +463,34 @@ start_date, end_date = st.sidebar.slider(
 # FILTER DATA
 # ======================================================
 def filter_by_date(dataframe, start, end):
-    mask = (dataframe.index.date >= start) & (dataframe.index.date <= end)
-    return dataframe.loc[mask]
+    if dataframe.empty:
+        return dataframe
+
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+
+    if dataframe.index.tz is not None:
+        start_ts = start_ts.tz_localize(dataframe.index.tz)
+        end_ts = end_ts.tz_localize(dataframe.index.tz)
+
+    return dataframe.loc[start_ts:end_ts]
+
+
+@st.cache_data(max_entries=8)
+def build_compare_overview_data(start, end):
+    compare_df = filter_by_date(build_comparison_df(), start, end).dropna(how="all")
+    daily = compare_df.resample("D").mean()
+    monthly = compare_df.resample("M").mean()
+    monthly_pat = compare_df.groupby(compare_df.index.month).mean()
+    hourly_pat = compare_df.groupby(compare_df.index.hour).mean()
+    daily_box = daily.copy()
+    daily_box["Year"] = daily_box.index.year
+    desc = compare_df.describe().T
+    if "50%" in desc.columns:
+        desc.insert(2, "median", desc.pop("50%"))
+    corr = compare_df.corr()
+    total_recs = int(compare_df.notna().sum().sum())
+    return total_recs, desc, daily, monthly, monthly_pat, hourly_pat, daily_box, corr
 
 
 def thin_time_series(dataframe, max_points=50000):
@@ -510,6 +537,16 @@ def select_time_focus(dataframe, key_prefix):
 
 if is_compare:
     compare_df = filter_by_date(compare_df_full, start_date, end_date).dropna(how="all")
+    (
+        compare_total_recs,
+        compare_desc,
+        compare_daily,
+        compare_monthly,
+        compare_monthly_pat,
+        compare_hourly_pat,
+        compare_daily_box,
+        compare_corr,
+    ) = build_compare_overview_data(start_date, end_date)
 else:
     loc_df = filter_by_date(loc_df_raw, start_date, end_date)
     if loc_df.empty:
@@ -531,11 +568,10 @@ else:
 
 # Sidebar record count
 if is_compare:
-    total_recs = int(compare_df.notna().sum().sum())
     st.sidebar.markdown(
         f"<p style='color:{SUBTEXT_COL}; font-size:0.9rem;'>"
         f"Total records across all locations: "
-        f"<span style='color:{TEXT_COL}; font-weight:600;'>{total_recs:,}</span></p>",
+        f"<span style='color:{TEXT_COL}; font-weight:600;'>{compare_total_recs:,}</span></p>",
         unsafe_allow_html=True,
     )
 else:
@@ -1037,7 +1073,7 @@ fig_map.update_layout(
     paper_bgcolor="rgba(0,0,0,0)",
     font=dict(color=TEXT_COL),
 )
-st.plotly_chart(fig_map, use_container_width=True)
+st.plotly_chart(fig_map, width="stretch")
 
 st.caption('Select a location from the sidebar to explore it individually, or stay on "All Locations" to compare.')
 
@@ -1079,9 +1115,8 @@ if is_compare:
                     st.caption("No data in selected range")
 
     st.markdown("#### Descriptive statistics (flow in Kscmh)")
-    desc = build_descriptive_stats(compare_df)
     st.dataframe(
-        desc.style.format(
+        compare_desc.style.format(
             {
                 "count": "{:,.0f}",
                 "mean": "{:,.4f}",
@@ -1094,7 +1129,7 @@ if is_compare:
             }
         ),
         use_container_width=True,
-        height=min(350, 80 + 28 * len(desc)),
+        height=min(350, 80 + 28 * len(compare_desc)),
     )
 
     # --------------------------------------------------
@@ -1143,25 +1178,23 @@ if is_compare:
         st.caption(
             f"To keep things fast, this chart shows {len(resampled):,} of {raw_points:,} points."
         )
-    st.plotly_chart(fig_trend, use_container_width=True)
+    st.plotly_chart(fig_trend, width="stretch")
 
     # --------------------------------------------------
     # 2. Daily averages
     # --------------------------------------------------
     st.markdown("## Daily averages")
 
-    daily = compare_df.resample("D").mean()
-    fig_daily = build_comparison_chart(daily, "Daily Average Flow", "Year")
-    st.plotly_chart(fig_daily, use_container_width=True)
+    fig_daily = build_comparison_chart(compare_daily, "Daily Average Flow", "Year")
+    st.plotly_chart(fig_daily, width="stretch")
 
     # --------------------------------------------------
     # 3. Monthly seasonality
     # --------------------------------------------------
     st.markdown("## Monthly averages (multi-year seasonality)")
 
-    monthly = compare_df.resample("M").mean()
-    fig_monthly = build_comparison_chart(monthly, "Monthly Average Flow", "Year")
-    st.plotly_chart(fig_monthly, use_container_width=True)
+    fig_monthly = build_comparison_chart(compare_monthly, "Monthly Average Flow", "Year")
+    st.plotly_chart(fig_monthly, width="stretch")
 
     # --------------------------------------------------
     # 4. Average by calendar month
@@ -1172,7 +1205,7 @@ if is_compare:
         "Jan", "Feb", "Mar", "Apr", "May", "Jun",
         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ]
-    monthly_pat = compare_df.groupby(compare_df.index.month).mean()
+    monthly_pat = compare_monthly_pat.copy()
     monthly_pat.index = month_labels[: len(monthly_pat)]
 
     fig_mpat = build_comparison_chart(
@@ -1182,30 +1215,26 @@ if is_compare:
         mode="lines+markers",
         marker_size=8,
     )
-    st.plotly_chart(fig_mpat, use_container_width=True)
+    st.plotly_chart(fig_mpat, width="stretch")
 
     # --------------------------------------------------
     # 5. Average by hour of day
     # --------------------------------------------------
     st.markdown("## Average by hour of day")
 
-    hourly_pat = compare_df.groupby(compare_df.index.hour).mean()
     fig_hpat = build_comparison_chart(
-        hourly_pat,
+        compare_hourly_pat,
         "Average Flow by Hour of Day",
         "Hour",
         mode="lines+markers",
         marker_size=7,
     )
-    st.plotly_chart(fig_hpat, use_container_width=True)
+    st.plotly_chart(fig_hpat, width="stretch")
 
     # --------------------------------------------------
     # 6. Yearly distribution (boxplots)
     # --------------------------------------------------
     st.markdown("## Distribution of daily flow by year")
-
-    daily_box = compare_df.resample("D").mean()
-    daily_box["Year"] = daily_box.index.year
 
     box_location = st.selectbox(
         "Location to show",
@@ -1213,22 +1242,21 @@ if is_compare:
         key="compare_box_location",
     )
     fig_box = build_yearly_box_plot(
-        daily_box,
+        compare_daily_box,
         box_location,
         f"Daily Flow Distribution by Year – {box_location}",
         LOCATION_COLOURS[box_location],
         flow_unit="Kscmh",
     )
-    st.plotly_chart(fig_box, use_container_width=True)
+    st.plotly_chart(fig_box, width="stretch")
 
     # --------------------------------------------------
     # 7. Correlation heatmap
     # --------------------------------------------------
     st.markdown("## Correlation between locations")
 
-    corr = compare_df.corr()
-    fig_corr = build_correlation_heatmap(corr, "Correlation Between Locations")
-    st.plotly_chart(fig_corr, use_container_width=True)
+    fig_corr = build_correlation_heatmap(compare_corr, "Correlation Between Locations")
+    st.plotly_chart(fig_corr, width="stretch")
 
     # --------------------------------------------------
     # Raw data
@@ -1404,7 +1432,7 @@ else:
         st.caption(
             f"To keep things fast, this chart shows {len(plot_data):,} of {raw_points:,} points."
         )
-    st.plotly_chart(fig_trend, use_container_width=True)
+    st.plotly_chart(fig_trend, width="stretch")
 
     # --------------------------------------------------
     # 2. Daily averages
@@ -1419,7 +1447,7 @@ else:
         colour_map,
         flow_unit=flow_unit,
     )
-    st.plotly_chart(fig_daily, use_container_width=True)
+    st.plotly_chart(fig_daily, width="stretch")
 
     # --------------------------------------------------
     # 3. Monthly seasonality
@@ -1434,7 +1462,7 @@ else:
         colour_map,
         flow_unit=flow_unit,
     )
-    st.plotly_chart(fig_monthly, use_container_width=True)
+    st.plotly_chart(fig_monthly, width="stretch")
 
     # --------------------------------------------------
     # 4. Average by calendar month
@@ -1457,7 +1485,7 @@ else:
         mode="lines+markers",
         marker_size=8,
     )
-    st.plotly_chart(fig_mpat, use_container_width=True)
+    st.plotly_chart(fig_mpat, width="stretch")
 
     # --------------------------------------------------
     # 5. Average by hour of day
@@ -1474,7 +1502,7 @@ else:
         mode="lines+markers",
         marker_size=7,
     )
-    st.plotly_chart(fig_hpat, use_container_width=True)
+    st.plotly_chart(fig_hpat, width="stretch")
 
     # --------------------------------------------------
     # 6. Yearly distribution (boxplots)
@@ -1497,7 +1525,7 @@ else:
         colour_map.get(selected_box_col, default_colour),
         flow_unit=flow_unit,
     )
-    st.plotly_chart(fig_box, use_container_width=True)
+    st.plotly_chart(fig_box, width="stretch")
 
     # --------------------------------------------------
     # 7. Correlation heatmap
@@ -1511,7 +1539,7 @@ else:
             "Correlation Between Series",
             base_colour=LOCATION_COLOURS.get(view_mode),
         )
-        st.plotly_chart(fig_corr, use_container_width=True)
+        st.plotly_chart(fig_corr, width="stretch")
 
     # --------------------------------------------------
     # Raw data
