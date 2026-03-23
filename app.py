@@ -414,13 +414,23 @@ def refresh_location_caches():
 
 
 refresh_location_caches()
-compare_df_full = None
 
 
 def encode_logo_to_base64(path: Path):
     if not path.exists():
         return ""
     return base64.b64encode(path.read_bytes()).decode("utf-8")
+
+
+@st.cache_data
+def get_compare_date_bounds():
+    mins = []
+    maxs = []
+    for name in LOCATIONS:
+        series = load_compare_series(name)
+        mins.append(series.index.min())
+        maxs.append(series.index.max())
+    return min(mins).date(), max(maxs).date()
 
 
 # ======================================================
@@ -441,9 +451,7 @@ st.sidebar.markdown("---")
 # SIDEBAR – DATE RANGE (context-dependent)
 # ======================================================
 if is_compare:
-    compare_df_full = build_comparison_df()
-    global_min = compare_df_full.index.min().date()
-    global_max = compare_df_full.index.max().date()
+    global_min, global_max = get_compare_date_bounds()
 else:
     loc_df_raw = load_location(view_mode)
     global_min = loc_df_raw.index.min().date()
@@ -477,20 +485,76 @@ def filter_by_date(dataframe, start, end):
 
 
 @st.cache_data(max_entries=8)
-def build_compare_overview_data(start, end):
-    compare_df = filter_by_date(build_comparison_df(), start, end).dropna(how="all")
-    daily = compare_df.resample("D").mean()
-    monthly = compare_df.resample("M").mean()
-    monthly_pat = compare_df.groupby(compare_df.index.month).mean()
-    hourly_pat = compare_df.groupby(compare_df.index.hour).mean()
-    daily_box = daily.copy()
-    daily_box["Year"] = daily_box.index.year
-    desc = compare_df.describe().T
-    if "50%" in desc.columns:
-        desc.insert(2, "median", desc.pop("50%"))
-    corr = compare_df.corr()
-    total_recs = int(compare_df.notna().sum().sum())
-    return total_recs, desc, daily, monthly, monthly_pat, hourly_pat, daily_box, corr
+def build_compare_summary_data(start, end):
+    rows = []
+    total_recs = 0
+
+    for name in LOCATIONS:
+        series = filter_by_date(load_compare_series(name), start, end).dropna()
+        count = int(series.count())
+        total_recs += count
+
+        if count == 0:
+            rows.append(
+                {
+                    "Location": name,
+                    "count": 0,
+                    "start": None,
+                    "end": None,
+                    "mean": pd.NA,
+                    "median": pd.NA,
+                    "std": pd.NA,
+                    "min": pd.NA,
+                    "25%": pd.NA,
+                    "75%": pd.NA,
+                    "max": pd.NA,
+                }
+            )
+            continue
+
+        desc = series.describe()
+        rows.append(
+            {
+                "Location": name,
+                "count": count,
+                "start": series.index.min().date(),
+                "end": series.index.max().date(),
+                "mean": desc["mean"],
+                "median": desc["50%"],
+                "std": desc["std"],
+                "min": desc["min"],
+                "25%": desc["25%"],
+                "75%": desc["75%"],
+                "max": desc["max"],
+            }
+        )
+
+    summary_df = pd.DataFrame(rows).set_index("Location")
+    return total_recs, summary_df
+
+
+@st.cache_data(max_entries=16)
+def build_compare_resampled_df(freq, start, end):
+    frames = {}
+    for name in LOCATIONS:
+        series = filter_by_date(load_compare_series(name), start, end)
+        if freq != "1min":
+            series = series.resample(freq).mean()
+        frames[name] = series.astype("float32")
+    return pd.DataFrame(frames).astype("float32").dropna(how="all")
+
+
+@st.cache_data(max_entries=8)
+def build_compare_pattern_df(pattern, start, end):
+    frames = {}
+    for name in LOCATIONS:
+        series = filter_by_date(load_compare_series(name), start, end).dropna()
+        if pattern == "month":
+            grouped = series.groupby(series.index.month).mean()
+        else:
+            grouped = series.groupby(series.index.hour).mean()
+        frames[name] = grouped.astype("float32")
+    return pd.DataFrame(frames).astype("float32")
 
 
 def thin_time_series(dataframe, max_points=50000):
@@ -536,17 +600,7 @@ def select_time_focus(dataframe, key_prefix):
 
 
 if is_compare:
-    compare_df = filter_by_date(compare_df_full, start_date, end_date).dropna(how="all")
-    (
-        compare_total_recs,
-        compare_desc,
-        compare_daily,
-        compare_monthly,
-        compare_monthly_pat,
-        compare_hourly_pat,
-        compare_daily_box,
-        compare_corr,
-    ) = build_compare_overview_data(start_date, end_date)
+    compare_total_recs, compare_summary = build_compare_summary_data(start_date, end_date)
 else:
     loc_df = filter_by_date(loc_df_raw, start_date, end_date)
     if loc_df.empty:
@@ -753,11 +807,18 @@ def build_descriptive_stats(df):
     return desc
 
 
+def show_stretch_dataframe(data, **kwargs):
+    try:
+        st.dataframe(data, width="stretch", **kwargs)
+    except TypeError:
+        st.dataframe(data, use_container_width=True, **kwargs)
+
+
 def show_head_tail_dataframe(df, head_rows=100, tail_rows=100):
     st.caption(f"First {head_rows} rows")
-    st.dataframe(df.head(head_rows), use_container_width=True)
+    show_stretch_dataframe(df.head(head_rows))
     st.caption(f"Last {tail_rows} rows")
-    st.dataframe(df.tail(tail_rows), use_container_width=True)
+    show_stretch_dataframe(df.tail(tail_rows))
 
 
 def hex_to_rgb(colour):
@@ -1103,19 +1164,24 @@ if is_compare:
     st.markdown("## Summary statistics")
     st.caption("One representative flow per location, all converted to Kscmh")
 
+    compare_desc = compare_summary[
+        ["count", "mean", "median", "std", "min", "25%", "75%", "max"]
+    ]
+
     for row_names in chunk_list(list(LOCATIONS.keys()), 3):
         mcols = st.columns(3)
         for col_idx, name in enumerate(row_names):
-            d = compare_df[name].dropna() if name in compare_df.columns else pd.Series(dtype="float32")
+            site_summary = compare_summary.loc[name]
+            count = int(site_summary["count"])
             with mcols[col_idx]:
-                st.metric(name, f"{len(d):,} records")
-                if len(d) > 0:
-                    st.caption(f"{d.index.min().date()} → {d.index.max().date()}")
+                st.metric(name, f"{count:,} records")
+                if count > 0:
+                    st.caption(f"{site_summary['start']} → {site_summary['end']}")
                 else:
                     st.caption("No data in selected range")
 
     st.markdown("#### Descriptive statistics (flow in Kscmh)")
-    st.dataframe(
+    show_stretch_dataframe(
         compare_desc.style.format(
             {
                 "count": "{:,.0f}",
@@ -1128,141 +1194,159 @@ if is_compare:
                 "max": "{:,.4f}",
             }
         ),
-        use_container_width=True,
         height=min(350, 80 + 28 * len(compare_desc)),
     )
 
     # --------------------------------------------------
-    # 1. Trend over time
+    # Compare analysis
     # --------------------------------------------------
-    st.markdown("## Trend over time")
+    st.markdown("## Compare analysis")
+    compare_section = st.selectbox(
+        "Section",
+        options=[
+            "Choose a section",
+            "Trend over time",
+            "Daily averages",
+            "Monthly averages",
+            "Average by calendar month",
+            "Average by hour of day",
+            "Distribution of daily flow by year",
+            "Correlation between locations",
+            "Raw data",
+        ],
+        key="compare_section",
+    )
 
-    ctrl1, ctrl2, ctrl3 = st.columns(3)
-    with ctrl3:
-        trend_location = st.selectbox(
+    if compare_section == "Choose a section":
+        st.info("Choose one analysis section to load. This keeps the Streamlit Cloud app responsive.")
+
+    elif compare_section == "Trend over time":
+        st.markdown("## Trend over time")
+
+        ctrl1, ctrl2, ctrl3 = st.columns(3)
+        with ctrl3:
+            trend_location = st.selectbox(
+                "Location to show",
+                options=["All locations"] + list(LOCATIONS.keys()),
+                index=0,
+                key="compare_trend_location",
+            )
+        with ctrl2:
+            agg_choice = st.selectbox(
+                "Data granularity",
+                options=list(FREQ_MAP.keys()),
+                index=list(FREQ_MAP.keys()).index("Daily"),
+            )
+
+        compare_trend_df = build_compare_resampled_df(
+            FREQ_MAP[agg_choice], start_date, end_date
+        )
+        trend_source = (
+            compare_trend_df
+            if trend_location == "All locations"
+            else compare_trend_df[[trend_location]]
+        )
+
+        with ctrl1:
+            trend_base, focus_caption = select_time_focus(
+                trend_source, key_prefix="cmp_trend"
+            )
+        if trend_base.empty:
+            st.info("No data in this period. Pick a different year/month/day.")
+            st.stop()
+
+        raw_points = len(trend_base)
+        plot_data, thin_step = thin_time_series(trend_base)
+
+        trend_title = f"Flow Comparison – {agg_choice.lower()} averages"
+        if trend_location != "All locations":
+            trend_title = f"{trend_location} – {agg_choice.lower()} averages"
+
+        fig_trend = build_comparison_chart(
+            plot_data,
+            trend_title,
+            "Time",
+        )
+        st.caption(focus_caption)
+        if thin_step > 1:
+            st.caption(
+                f"To keep things fast, this chart shows {len(plot_data):,} of {raw_points:,} points."
+            )
+        st.plotly_chart(fig_trend, width="stretch")
+
+    elif compare_section == "Daily averages":
+        st.markdown("## Daily averages")
+        compare_daily = build_compare_resampled_df("D", start_date, end_date)
+        fig_daily = build_comparison_chart(compare_daily, "Daily Average Flow", "Year")
+        st.plotly_chart(fig_daily, width="stretch")
+
+    elif compare_section == "Monthly averages":
+        st.markdown("## Monthly averages (multi-year seasonality)")
+        compare_monthly = build_compare_resampled_df("M", start_date, end_date)
+        fig_monthly = build_comparison_chart(
+            compare_monthly, "Monthly Average Flow", "Year"
+        )
+        st.plotly_chart(fig_monthly, width="stretch")
+
+    elif compare_section == "Average by calendar month":
+        st.markdown("## Average by calendar month")
+        month_labels = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ]
+        monthly_pat = build_compare_pattern_df("month", start_date, end_date)
+        monthly_pat.index = month_labels[: len(monthly_pat)]
+        fig_mpat = build_comparison_chart(
+            monthly_pat,
+            "Average Flow by Calendar Month",
+            "Month",
+            mode="lines+markers",
+            marker_size=8,
+        )
+        st.plotly_chart(fig_mpat, width="stretch")
+
+    elif compare_section == "Average by hour of day":
+        st.markdown("## Average by hour of day")
+        compare_hourly_pat = build_compare_pattern_df("hour", start_date, end_date)
+        fig_hpat = build_comparison_chart(
+            compare_hourly_pat,
+            "Average Flow by Hour of Day",
+            "Hour",
+            mode="lines+markers",
+            marker_size=7,
+        )
+        st.plotly_chart(fig_hpat, width="stretch")
+
+    elif compare_section == "Distribution of daily flow by year":
+        st.markdown("## Distribution of daily flow by year")
+        compare_daily_box = build_compare_resampled_df("D", start_date, end_date)
+        compare_daily_box["Year"] = compare_daily_box.index.year
+        box_location = st.selectbox(
             "Location to show",
-            options=["All locations"] + list(LOCATIONS.keys()),
-            index=0,
-            key="compare_trend_location",
+            options=list(LOCATIONS.keys()),
+            key="compare_box_location",
         )
-    trend_source = (
-        compare_df if trend_location == "All locations" else compare_df[[trend_location]]
-    )
-    with ctrl1:
-        trend_base, focus_caption = select_time_focus(trend_source, key_prefix="cmp_trend")
-    with ctrl2:
-        agg_choice = st.selectbox(
-            "Data granularity",
-            options=list(FREQ_MAP.keys()),
-            index=list(FREQ_MAP.keys()).index("Daily"),
+        fig_box = build_yearly_box_plot(
+            compare_daily_box,
+            box_location,
+            f"Daily Flow Distribution by Year – {box_location}",
+            LOCATION_COLOURS[box_location],
+            flow_unit="Kscmh",
         )
-    if trend_base.empty:
-        st.info("No data in this period. Pick a different year/month/day.")
-        st.stop()
+        st.plotly_chart(fig_box, width="stretch")
 
-    resampled = trend_base.resample(FREQ_MAP[agg_choice]).mean().dropna(how="all")
-    raw_points = len(resampled)
-    resampled, thin_step = thin_time_series(resampled)
+    elif compare_section == "Correlation between locations":
+        st.markdown("## Correlation between locations")
+        compare_corr = build_compare_resampled_df("D", start_date, end_date).corr()
+        st.caption("Computed from daily representative flow to keep compare mode responsive.")
+        fig_corr = build_correlation_heatmap(compare_corr, "Correlation Between Locations")
+        st.plotly_chart(fig_corr, width="stretch")
 
-    trend_title = f"Flow Comparison – {agg_choice.lower()} averages"
-    if trend_location != "All locations":
-        trend_title = f"{trend_location} – {agg_choice.lower()} averages"
-
-    fig_trend = build_comparison_chart(
-        resampled,
-        trend_title,
-        "Time",
-    )
-    st.caption(focus_caption)
-    if thin_step > 1:
-        st.caption(
-            f"To keep things fast, this chart shows {len(resampled):,} of {raw_points:,} points."
-        )
-    st.plotly_chart(fig_trend, width="stretch")
-
-    # --------------------------------------------------
-    # 2. Daily averages
-    # --------------------------------------------------
-    st.markdown("## Daily averages")
-
-    fig_daily = build_comparison_chart(compare_daily, "Daily Average Flow", "Year")
-    st.plotly_chart(fig_daily, width="stretch")
-
-    # --------------------------------------------------
-    # 3. Monthly seasonality
-    # --------------------------------------------------
-    st.markdown("## Monthly averages (multi-year seasonality)")
-
-    fig_monthly = build_comparison_chart(compare_monthly, "Monthly Average Flow", "Year")
-    st.plotly_chart(fig_monthly, width="stretch")
-
-    # --------------------------------------------------
-    # 4. Average by calendar month
-    # --------------------------------------------------
-    st.markdown("## Average by calendar month")
-
-    month_labels = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ]
-    monthly_pat = compare_monthly_pat.copy()
-    monthly_pat.index = month_labels[: len(monthly_pat)]
-
-    fig_mpat = build_comparison_chart(
-        monthly_pat,
-        "Average Flow by Calendar Month",
-        "Month",
-        mode="lines+markers",
-        marker_size=8,
-    )
-    st.plotly_chart(fig_mpat, width="stretch")
-
-    # --------------------------------------------------
-    # 5. Average by hour of day
-    # --------------------------------------------------
-    st.markdown("## Average by hour of day")
-
-    fig_hpat = build_comparison_chart(
-        compare_hourly_pat,
-        "Average Flow by Hour of Day",
-        "Hour",
-        mode="lines+markers",
-        marker_size=7,
-    )
-    st.plotly_chart(fig_hpat, width="stretch")
-
-    # --------------------------------------------------
-    # 6. Yearly distribution (boxplots)
-    # --------------------------------------------------
-    st.markdown("## Distribution of daily flow by year")
-
-    box_location = st.selectbox(
-        "Location to show",
-        options=list(LOCATIONS.keys()),
-        key="compare_box_location",
-    )
-    fig_box = build_yearly_box_plot(
-        compare_daily_box,
-        box_location,
-        f"Daily Flow Distribution by Year – {box_location}",
-        LOCATION_COLOURS[box_location],
-        flow_unit="Kscmh",
-    )
-    st.plotly_chart(fig_box, width="stretch")
-
-    # --------------------------------------------------
-    # 7. Correlation heatmap
-    # --------------------------------------------------
-    st.markdown("## Correlation between locations")
-
-    fig_corr = build_correlation_heatmap(compare_corr, "Correlation Between Locations")
-    st.plotly_chart(fig_corr, width="stretch")
-
-    # --------------------------------------------------
-    # Raw data
-    # --------------------------------------------------
-    with st.expander("Show comparison data (first and last 100 rows)"):
-        show_head_tail_dataframe(compare_df)
+    else:
+        st.markdown("## Raw data")
+        compare_raw = build_compare_resampled_df("1min", start_date, end_date)
+        with st.expander("Show comparison data (first and last 100 rows)", expanded=True):
+            show_head_tail_dataframe(compare_raw)
 
 
 # ##########################################################################
@@ -1294,7 +1378,7 @@ else:
 
     st.markdown("#### Descriptive statistics")
     desc = build_descriptive_stats(loc_df)
-    st.dataframe(
+    show_stretch_dataframe(
         desc.style.format(
             {
                 "count": "{:,.0f}",
@@ -1307,7 +1391,6 @@ else:
                 "max": "{:,.4f}",
             }
         ),
-        use_container_width=True,
         height=min(350, 80 + 28 * len(desc)),
     )
 
