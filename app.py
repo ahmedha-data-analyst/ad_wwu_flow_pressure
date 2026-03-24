@@ -656,12 +656,12 @@ def select_time_focus(dataframe, key_prefix):
 if is_compare:
     compare_total_recs, compare_summary = build_compare_summary_data(start_date, end_date)
 else:
-    loc_df = filter_by_date(loc_df_raw, start_date, end_date)
-    if loc_df.empty:
+    loc_df_full = filter_by_date(loc_df_raw, start_date, end_date)
+    if loc_df_full.empty:
         st.warning("No data in the selected date range. Expand the date range to continue.")
         st.stop()
     # Series selector for individual mode
-    all_cols = list(loc_df.columns)
+    all_cols = list(loc_df_full.columns)
     selected_cols = st.sidebar.multiselect(
         "Select series",
         options=all_cols,
@@ -671,7 +671,7 @@ else:
     if not selected_cols:
         st.sidebar.error("Please select at least one series.")
         st.stop()
-    loc_df = loc_df[selected_cols]
+    loc_df = loc_df_full[selected_cols]
 
 
 # Sidebar record count
@@ -859,6 +859,31 @@ def build_descriptive_stats(df):
     if "50%" in desc.columns:
         desc.insert(2, "median", desc.pop("50%"))
     return desc
+
+
+def build_yearly_record_count_chart(series, title, colour):
+    yearly_counts = series.groupby(series.index.year).count()
+    yearly_counts.index = yearly_counts.index.astype(str)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=yearly_counts.index,
+            y=yearly_counts.values,
+            marker=dict(
+                color=colour,
+                line=dict(color=blend_hex(colour, BACKGROUND, 0.45), width=1.1),
+            ),
+            text=[f"{int(val):,}" for val in yearly_counts.values],
+            textposition="outside",
+            cliponaxis=False,
+            hovertemplate="Year %{x}<br>Records %{y:,}<extra></extra>",
+            showlegend=False,
+        )
+    )
+    fig.update_layout(xaxis_title="Year", yaxis_title="Records", showlegend=False)
+    fig.update_yaxes(rangemode="tozero", tickformat=",d")
+    return apply_dark_layout(fig, title)
 
 
 def show_stretch_dataframe(data, **kwargs):
@@ -1449,6 +1474,42 @@ else:
         ),
         height=min(350, 80 + 28 * len(desc)),
     )
+
+    # --------------------------------------------------
+    # Records by year
+    # --------------------------------------------------
+    st.markdown("## Records by year")
+
+    if view_mode == "Enfield & Charlton":
+        record_count_col = st.selectbox(
+            "Flow series to count",
+            options=[
+                col
+                for col in ["Enfield flow (F1)", "Charlton flow (F1)"]
+                if col in loc_df_full.columns
+            ],
+            format_func=lambda col: get_display_series_name(col, flow_unit=loc_meta["flow_unit"]),
+            key=f"{view_mode}_record_count_series",
+        )
+    else:
+        record_count_col = loc_meta["compare_col"]
+        if record_count_col not in loc_df_full.columns:
+            record_count_col = loc_df_full.columns[0]
+
+    record_series = loc_df_full[record_count_col].dropna()
+    record_colour = colour_map.get(record_count_col, default_colour)
+    st.caption(
+        f"Annual non-null record counts for {get_display_series_name(record_count_col, flow_unit=loc_meta['flow_unit'])} in the selected date range."
+    )
+    if record_series.empty:
+        st.info("No records for that series in the selected date range.")
+    else:
+        fig_records = build_yearly_record_count_chart(
+            record_series,
+            f"{view_mode} – Records by Year",
+            record_colour,
+        )
+        st.plotly_chart(fig_records, width="stretch")
 
     # --------------------------------------------------
     # 1. Trend over time
