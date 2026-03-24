@@ -78,6 +78,40 @@ SERIES_DISPLAY_NAMES = {
     "Charlton outlet (MP1)": "Charlton outlet pressure (MP1)",
 }
 
+SEASON_ORDER = ["Spring", "Summer", "Autumn", "Winter"]
+SEASON_BY_MONTH = {
+    12: "Winter",
+    1: "Winter",
+    2: "Winter",
+    3: "Spring",
+    4: "Spring",
+    5: "Spring",
+    6: "Summer",
+    7: "Summer",
+    8: "Summer",
+    9: "Autumn",
+    10: "Autumn",
+    11: "Autumn",
+}
+SEASON_ANCHOR_COLOURS = {
+    "Spring": "#74c476",
+    "Summer": "#f6c453",
+    "Autumn": "#d97706",
+    "Winter": "#60a5fa",
+}
+SEASON_LINE_DASHES = {
+    "Spring": "solid",
+    "Summer": "dash",
+    "Autumn": "dot",
+    "Winter": "dashdot",
+}
+SEASON_MARKER_SYMBOLS = {
+    "Spring": "circle",
+    "Summer": "diamond",
+    "Autumn": "square",
+    "Winter": "x",
+}
+
 
 # ======================================================
 # LOCATION METADATA
@@ -919,6 +953,75 @@ def blend_hex(colour_a, colour_b, amount):
     return rgb_to_hex(blended)
 
 
+def get_location_season_colours(base_colour):
+    return {
+        season: blend_hex(base_colour, anchor, 0.58)
+        for season, anchor in SEASON_ANCHOR_COLOURS.items()
+    }
+
+
+def build_seasonal_trend_chart(series, col, title, base_colour, flow_unit):
+    display_series = get_display_series_values(series.dropna(), col, flow_unit)
+    if display_series.empty:
+        return None
+
+    daily = display_series.resample("D").mean().dropna()
+    if daily.empty:
+        return None
+
+    seasonal_df = daily.to_frame(name="value")
+    seasonal_df["Season"] = [SEASON_BY_MONTH[m] for m in seasonal_df.index.month]
+    seasonal_df["SeasonYear"] = (
+        seasonal_df.index.year + (seasonal_df.index.month == 12).astype(int)
+    )
+    seasonal_avg = (
+        seasonal_df.groupby(["SeasonYear", "Season"])["value"]
+        .mean()
+        .unstack("Season")
+        .reindex(columns=SEASON_ORDER)
+        .dropna(how="all")
+    )
+
+    if seasonal_avg.empty:
+        return None
+
+    season_colours = get_location_season_colours(base_colour)
+    fig = go.Figure()
+    for season in SEASON_ORDER:
+        if season not in seasonal_avg.columns:
+            continue
+        season_vals = seasonal_avg[season].dropna()
+        if season_vals.empty:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=season_vals.index,
+                y=season_vals.values,
+                mode="lines+markers",
+                name=season,
+                line=dict(
+                    color=season_colours[season],
+                    width=2.6,
+                    dash=SEASON_LINE_DASHES[season],
+                ),
+                marker=dict(size=8, symbol=SEASON_MARKER_SYMBOLS[season]),
+                hovertemplate=(
+                    f"{season}<br>Season year %{{x}}<br>"
+                    f"{get_series_axis_label(col, flow_unit)} %{{y:,.4f}}<extra></extra>"
+                ),
+            )
+        )
+
+    if not fig.data:
+        return None
+
+    fig.update_layout(
+        xaxis_title="Season year",
+        yaxis_title=get_series_axis_label(col, flow_unit),
+    )
+    return apply_dark_layout(fig, title)
+
+
 def get_location_correlation_scale(base_colour):
     negative_base = "#7cc7ff"
     zero_base = blend_hex(PANEL_BG, TEXT_COL, 0.06)
@@ -1475,6 +1578,16 @@ else:
         height=min(350, 80 + 28 * len(desc)),
     )
 
+    flow_unit = loc_meta["flow_unit"]
+    if loc_meta["flow_unit"] == "Scmh":
+        flow_unit = st.radio(
+            "Flow display unit",
+            options=["Scmh", "kScmh"],
+            horizontal=True,
+            index=1,
+            key=f"{view_mode}_flow_unit",
+        )
+
     # --------------------------------------------------
     # Records by year
     # --------------------------------------------------
@@ -1512,6 +1625,32 @@ else:
         st.plotly_chart(fig_records, width="stretch")
 
     # --------------------------------------------------
+    # Seasonal trend by year
+    # --------------------------------------------------
+    st.markdown("## Seasonal trend by year")
+
+    seasonal_col = st.selectbox(
+        "Column to compare across seasons",
+        options=list(loc_df.columns),
+        format_func=lambda col: get_display_series_name(col, flow_unit),
+        key=f"{view_mode}_seasonal_col",
+    )
+    st.caption(
+        "Each point shows the mean of daily averages within that season. Winter groups December with the following January and February."
+    )
+    fig_seasonal = build_seasonal_trend_chart(
+        loc_df[seasonal_col],
+        seasonal_col,
+        f"{view_mode} – {get_display_series_name(seasonal_col, flow_unit)} Seasonal Trend",
+        LOCATION_COLOURS.get(view_mode, default_colour),
+        flow_unit,
+    )
+    if fig_seasonal is None:
+        st.info("No seasonal data is available for that column in the selected date range.")
+    else:
+        st.plotly_chart(fig_seasonal, width="stretch")
+
+    # --------------------------------------------------
     # 1. Trend over time
     # --------------------------------------------------
     st.markdown("## Trend over time")
@@ -1534,16 +1673,6 @@ else:
     if trend_base.empty:
         st.info("No data in this period. Pick a different year/month/day.")
         st.stop()
-
-    # Flow unit toggle only for Great Hele (Scmh native)
-    flow_unit = loc_meta["flow_unit"]
-    if loc_meta["flow_unit"] == "Scmh":
-        flow_unit = st.radio(
-            "Flow display unit",
-            options=["Scmh", "kScmh"],
-            horizontal=True,
-            index=1,
-        )
 
     freq = FREQ_MAP[agg_choice]
     resampled = trend_base.resample(freq).mean().dropna(how="all")
