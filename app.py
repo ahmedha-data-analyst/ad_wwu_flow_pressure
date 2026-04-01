@@ -36,11 +36,12 @@ ACCENT_COLOUR = "#86d5f8"
 
 LOCATION_COLOURS = {
     "Great Hele": "#9bc53d",
-    "High Bickington": "#2f855a",
+    "High Bickington": "#e91e8c",
     "Whitminster": "#4ea8de",
     "Malmesbury": "#f77f00",
     "Aylesbeare": "#d7263d",
-    "Enfield & Charlton": "#7c3aed",
+    "Enfield": "#7c3aed",
+    "Charlton": "#0d9488",
 }
 
 # Per-location series colour maps (used in individual mode)
@@ -50,9 +51,9 @@ SERIES_COLOUR_MAPS = {
         "Pressure (Bar)": "#c5e67a",
     },
     "High Bickington": {
-        "Flow (Kscmh) F1": "#14532d",
-        "Flow (Kscmh) F2": "#22c55e",
-        "Flow (Kscmh) F3": "#a3e635",
+        "Flow (Kscmh) F1": "#a3105e",
+        "Flow (Kscmh) F2": "#e91e8c",
+        "Flow (Kscmh) F3": "#f48dbf",
     },
     "Whitminster": {
         "Flow (Kscmh)": "#4ea8de",
@@ -65,17 +66,21 @@ SERIES_COLOUR_MAPS = {
         "Aylesbeare IP Inferred mcm/d": "#d7263d",
         "Aylesbeare IP Inferred Kscmh": "#f26a7c",
     },
-    "Enfield & Charlton": {
+    "Enfield": {
         "Enfield flow (F1)": "#5b21b6",
-        "Charlton flow (F1)": "#8b5cf6",
-        "Enfield outlet (IP1)": "#38bdf8",
-        "Charlton outlet (MP1)": "#a5f3fc",
+        "Enfield outlet (IP1)": "#a78bfa",
+    },
+    "Charlton": {
+        "Charlton flow (F1)": "#0a7c72",
+        "Charlton outlet (MP1)": "#2dd4bf",
     },
 }
 
 SERIES_DISPLAY_NAMES = {
     "Enfield outlet (IP1)": "Enfield outlet pressure (IP1)",
     "Charlton outlet (MP1)": "Charlton outlet pressure (MP1)",
+    "Enfield flow (F1)": "Enfield flow (F1)",
+    "Charlton flow (F1)": "Charlton flow (F1)",
 }
 
 SEASON_ORDER = ["Spring", "Summer", "Autumn", "Winter"]
@@ -167,15 +172,27 @@ LOCATIONS = {
         "has_pressure": False,
         "description": "Flow · Devon (inferred + F1)",
     },
-    "Enfield & Charlton": {
+    "Enfield": {
         "file": "enfield_charlton_cleaned.parquet",
-        "lat": 51.60,
-        "lon": -2.16,
+        "lat": 51.62,
+        "lon": -2.20,
         "compare_col": "Enfield flow (F1)",
         "compare_scale": 1 / 1000,  # Scmh → Kscmh
         "flow_unit": "Scmh",
         "has_pressure": True,
-        "description": "Flows & outlet pressures",
+        "description": "Flow & outlet pressure · Gloucestershire",
+        "columns": ["Enfield outlet (IP1)", "Enfield flow (F1)"],
+    },
+    "Charlton": {
+        "file": "enfield_charlton_cleaned.parquet",
+        "lat": 51.58,
+        "lon": -2.12,
+        "compare_col": "Charlton flow (F1)",
+        "compare_scale": 1 / 1000,  # Scmh → Kscmh
+        "flow_unit": "Scmh",
+        "has_pressure": True,
+        "description": "Flow & outlet pressure · Gloucestershire",
+        "columns": ["Charlton outlet (MP1)", "Charlton flow (F1)"],
     },
 }
 
@@ -207,12 +224,12 @@ COMPARE_SERIES = {
         "scale": 1.0,
     },
     "Enfield flow (F1)": {
-        "file": LOCATIONS["Enfield & Charlton"]["file"],
+        "file": LOCATIONS["Enfield"]["file"],
         "col": "Enfield flow (F1)",
         "scale": 1 / 1000,
     },
     "Charlton flow (F1)": {
-        "file": LOCATIONS["Enfield & Charlton"]["file"],
+        "file": LOCATIONS["Charlton"]["file"],
         "col": "Charlton flow (F1)",
         "scale": 1 / 1000,
     },
@@ -225,7 +242,7 @@ COMPARE_SERIES_COLOURS = {
     "Malmesbury": LOCATION_COLOURS["Malmesbury"],
     "Aylesbeare": LOCATION_COLOURS["Aylesbeare"],
     "Enfield flow (F1)": "#5b21b6",
-    "Charlton flow (F1)": "#a78bfa",
+    "Charlton flow (F1)": "#0d9488",
 }
 
 
@@ -426,10 +443,11 @@ st.markdown(
 # ======================================================
 # DATA LOADING
 # ======================================================
-@st.cache_data(max_entries=1)
+@st.cache_data(max_entries=8)
 def load_location(name):
     meta = LOCATIONS[name]
-    df_local = pd.read_parquet(meta["file"])
+    read_cols = meta.get("columns", None)
+    df_local = pd.read_parquet(meta["file"], columns=read_cols)
     if not isinstance(df_local.index, pd.DatetimeIndex):
         for col in ["Time", "Datetime", "timestamp"]:
             if col in df_local.columns:
@@ -1328,10 +1346,10 @@ FREQ_MAP = {
     "1min": "1min",
     "15min": "15min",
     "30min": "30min",
-    "Hourly": "H",
+    "Hourly": "h",
     "Daily": "D",
     "Weekly": "W",
-    "Monthly": "M",
+    "Monthly": "ME",
 }
 
 
@@ -1464,7 +1482,7 @@ if is_compare:
 
     elif compare_section == "Monthly averages":
         st.markdown("## Monthly averages (multi-year seasonality)")
-        compare_monthly = build_compare_resampled_df("M", start_date, end_date)
+        compare_monthly = build_compare_resampled_df("ME", start_date, end_date)
         fig_monthly = build_comparison_chart(
             compare_monthly, "Monthly Average Flow", "Year"
         )
@@ -1593,21 +1611,9 @@ else:
     # --------------------------------------------------
     st.markdown("## Records by year")
 
-    if view_mode == "Enfield & Charlton":
-        record_count_col = st.selectbox(
-            "Flow series to count",
-            options=[
-                col
-                for col in ["Enfield flow (F1)", "Charlton flow (F1)"]
-                if col in loc_df_full.columns
-            ],
-            format_func=lambda col: get_display_series_name(col, flow_unit=loc_meta["flow_unit"]),
-            key=f"{view_mode}_record_count_series",
-        )
-    else:
-        record_count_col = loc_meta["compare_col"]
-        if record_count_col not in loc_df_full.columns:
-            record_count_col = loc_df_full.columns[0]
+    record_count_col = loc_meta["compare_col"]
+    if record_count_col not in loc_df_full.columns:
+        record_count_col = loc_df_full.columns[0]
 
     record_series = loc_df_full[record_count_col].dropna()
     record_colour = colour_map.get(record_count_col, default_colour)
@@ -1783,7 +1789,7 @@ else:
     # --------------------------------------------------
     st.markdown("## Monthly averages (multi-year seasonality)")
 
-    monthly = loc_df.resample("M").mean()
+    monthly = loc_df.resample("ME").mean()
     fig_monthly = build_stacked_line_chart(
         monthly,
         f"{view_mode} – Monthly Averages",
@@ -1836,11 +1842,12 @@ else:
     # --------------------------------------------------
     # 6. Yearly distribution (boxplots)
     # --------------------------------------------------
-    st.markdown("## Distribution of daily values by year")
+    st.markdown("## Distribution of values by year")
 
-    df_year = loc_df.resample("D").mean()
+    df_year = loc_df.copy()
     df_year["Year"] = df_year.index.year
     value_cols = [c for c in df_year.columns if c != "Year"]
+
     selected_box_col = st.selectbox(
         "Series to show",
         options=value_cols,
