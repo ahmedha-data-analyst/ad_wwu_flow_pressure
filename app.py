@@ -735,10 +735,18 @@ if is_compare:
         unsafe_allow_html=True,
     )
 else:
+    _sidebar_count_col = (
+        LOCATIONS[view_mode]["compare_col"]
+        if LOCATIONS[view_mode]["compare_col"] in loc_df.columns
+        else loc_df.columns[0]
+    )
+    _sidebar_count = int(loc_df[_sidebar_count_col].count())
+    _sidebar_min = loc_df[_sidebar_count_col].first_valid_index()
+    _sidebar_max = loc_df[_sidebar_count_col].last_valid_index()
     st.sidebar.markdown(
         f"<p style='color:{SUBTEXT_COL}; font-size:0.9rem;'>Records (filtered): "
-        f"<span style='color:{TEXT_COL}; font-weight:600;'>{len(loc_df):,}</span><br>"
-        f"{loc_df.index.min().date()} → {loc_df.index.max().date()}</p>",
+        f"<span style='color:{TEXT_COL}; font-weight:600;'>{_sidebar_count:,}</span><br>"
+        f"{_sidebar_min.date() if _sidebar_min else '–'} → {_sidebar_max.date() if _sidebar_max else '–'}</p>",
         unsafe_allow_html=True,
     )
 
@@ -833,43 +841,67 @@ def split_series_columns(columns):
     return flow_cols, pressure_cols, other_cols
 
 
-def is_native_scmh_series(col):
+def is_native_scmh_series(col, loc_flow_unit=None):
+    """Return True if this column holds data in Scmh (not kScmh).
+
+    Detects via column name when the unit is embedded (e.g. "Flow (Scmh)"),
+    and falls back to the location-level flow_unit when the column name has
+    no unit suffix (e.g. "Charlton flow (F1)" on a Scmh location).
+    """
     col_lower = col.lower()
-    return "scmh" in col_lower and "kscmh" not in col_lower
+    # Column name explicitly says kscmh → definitely not native Scmh
+    if "kscmh" in col_lower:
+        return False
+    # Column name explicitly says scmh → native Scmh
+    if "scmh" in col_lower:
+        return True
+    # No unit in the name — fall back to location metadata
+    if loc_flow_unit == "Scmh":
+        # Only treat flow columns this way, not pressure/outlet columns
+        if "flow" in col_lower and "pressure" not in col_lower and "outlet" not in col_lower:
+            return True
+    return False
 
 
-def get_display_series_name(col, flow_unit):
+def get_display_series_name(col, flow_unit, loc_flow_unit=None):
     display_name = SERIES_DISPLAY_NAMES.get(col, col)
-    if flow_unit == "kScmh" and is_native_scmh_series(col):
+    if flow_unit == "kScmh" and is_native_scmh_series(col, loc_flow_unit):
         display_name = display_name.replace("(Scmh)", "(kScmh)")
     return display_name
 
 
-def get_display_series_values(series, col, flow_unit):
-    if flow_unit == "kScmh" and is_native_scmh_series(col):
+def get_display_series_values(series, col, flow_unit, loc_flow_unit=None):
+    if flow_unit == "kScmh" and is_native_scmh_series(col, loc_flow_unit):
         return series / 1000.0
     return series
 
 
-def get_flow_axis_label(flow_cols, flow_unit):
+def get_flow_axis_label(flow_cols, flow_unit, loc_flow_unit=None):
     if not flow_cols:
         return "Value"
 
     col_lower = [c.lower() for c in flow_cols]
     has_mcmd = any("mcm/d" in c for c in col_lower)
     has_kscmh = any("kscmh" in c for c in col_lower)
-    has_scmh = any("scmh" in c and "kscmh" not in c for c in col_lower)
+    # A column is Scmh if it says "scmh" OR if the location is a Scmh location
+    has_scmh = any(
+        ("scmh" in c and "kscmh" not in c)
+        or (loc_flow_unit == "Scmh" and "flow" in c and "kscmh" not in c)
+        for c in col_lower
+    )
 
     if has_mcmd and (has_kscmh or has_scmh):
         return "Flow (mixed units)"
     if has_mcmd:
         return "Flow (mcm/d)"
-    if flow_unit == "kScmh":
+    if flow_unit == "kScmh" and (has_scmh or loc_flow_unit == "Scmh"):
         return "Flow (kScmh)"
+    if has_kscmh:
+        return "Flow (Kscmh)"
     return f"Flow ({flow_unit})"
 
 
-def get_series_axis_label(col, flow_unit):
+def get_series_axis_label(col, flow_unit, loc_flow_unit=None):
     col_lower = col.lower()
     if "pressure" in col_lower or "outlet" in col_lower:
         return "Pressure (Bar)"
@@ -877,16 +909,16 @@ def get_series_axis_label(col, flow_unit):
         return "Flow (mcm/d)"
     if "kscmh" in col_lower:
         return "Flow (Kscmh)"
-    if is_native_scmh_series(col):
+    if is_native_scmh_series(col, loc_flow_unit):
         return "Flow (kScmh)" if flow_unit == "kScmh" else "Flow (Scmh)"
     if "flow" in col_lower:
         return f"Flow ({flow_unit})"
     return "Value"
 
 
-def build_yearly_box_plot(df_year, selected_col, title, colour, flow_unit="Kscmh"):
-    plot_name = get_display_series_name(selected_col, flow_unit)
-    y_vals = get_display_series_values(df_year[selected_col], selected_col, flow_unit)
+def build_yearly_box_plot(df_year, selected_col, title, colour, flow_unit="Kscmh", loc_flow_unit=None):
+    plot_name = get_display_series_name(selected_col, flow_unit, loc_flow_unit)
+    y_vals = get_display_series_values(df_year[selected_col], selected_col, flow_unit, loc_flow_unit)
 
     fig = go.Figure()
     fig.add_trace(
@@ -901,7 +933,7 @@ def build_yearly_box_plot(df_year, selected_col, title, colour, flow_unit="Kscmh
     )
     fig.update_layout(
         xaxis_title="Year",
-        yaxis_title=get_series_axis_label(selected_col, flow_unit),
+        yaxis_title=get_series_axis_label(selected_col, flow_unit, loc_flow_unit),
     )
     return apply_dark_layout(fig, title)
 
@@ -978,8 +1010,8 @@ def get_location_season_colours(base_colour):
     }
 
 
-def build_seasonal_trend_chart(series, col, title, base_colour, flow_unit):
-    display_series = get_display_series_values(series.dropna(), col, flow_unit)
+def build_seasonal_trend_chart(series, col, title, base_colour, flow_unit, loc_flow_unit=None):
+    display_series = get_display_series_values(series.dropna(), col, flow_unit, loc_flow_unit)
     if display_series.empty:
         return None
 
@@ -1025,7 +1057,7 @@ def build_seasonal_trend_chart(series, col, title, base_colour, flow_unit):
                 marker=dict(size=8, symbol=SEASON_MARKER_SYMBOLS[season]),
                 hovertemplate=(
                     f"{season}<br>Season year %{{x}}<br>"
-                    f"{get_series_axis_label(col, flow_unit)} %{{y:,.4f}}<extra></extra>"
+                    f"{get_series_axis_label(col, flow_unit, loc_flow_unit)} %{{y:,.4f}}<extra></extra>"
                 ),
             )
         )
@@ -1035,7 +1067,7 @@ def build_seasonal_trend_chart(series, col, title, base_colour, flow_unit):
 
     fig.update_layout(
         xaxis_title="Season year",
-        yaxis_title=get_series_axis_label(col, flow_unit),
+        yaxis_title=get_series_axis_label(col, flow_unit, loc_flow_unit),
     )
     return apply_dark_layout(fig, title)
 
@@ -1081,12 +1113,13 @@ def build_correlation_heatmap(corr_df, title, base_colour=None):
 # HELPER: BUILD STACKED LINE CHART (individual mode)
 # ======================================================
 def build_stacked_line_chart(
-    plot_df, title, xaxis_title, colour_map, flow_unit="Kscmh", mode="lines", marker_size=7
+    plot_df, title, xaxis_title, colour_map, flow_unit="Kscmh", mode="lines", marker_size=7,
+    loc_flow_unit=None,
 ):
     flow_cols, pressure_cols, other_cols = split_series_columns(plot_df.columns)
     has_two_rows = bool(flow_cols and pressure_cols)
     nrows = 2 if has_two_rows else 1
-    flow_label = get_flow_axis_label(flow_cols, flow_unit)
+    flow_label = get_flow_axis_label(flow_cols, flow_unit, loc_flow_unit)
     default_colour = get_colour_fallback(colour_map)
 
     fig = make_subplots(rows=nrows, cols=1, shared_xaxes=True, vertical_spacing=0.08)
@@ -1102,9 +1135,9 @@ def build_stacked_line_chart(
             target_row = 2
 
         y_vals = plot_df[col]
-        trace_name = get_display_series_name(col, flow_unit)
+        trace_name = get_display_series_name(col, flow_unit, loc_flow_unit)
         if col in flow_cols:
-            y_vals = get_display_series_values(y_vals, col, flow_unit)
+            y_vals = get_display_series_values(y_vals, col, flow_unit, loc_flow_unit)
 
         trace_kwargs = dict(
             x=plot_df.index,
@@ -1566,8 +1599,11 @@ else:
     # --------------------------------------------------
     st.markdown("## Summary statistics")
 
-    start_ts = loc_df.index.min().strftime("%Y-%m-%d %H:%M")
-    end_ts = loc_df.index.max().strftime("%Y-%m-%d %H:%M")
+    _kpi_col = loc_meta["compare_col"] if loc_meta["compare_col"] in loc_df.columns else loc_df.columns[0]
+    _first_valid = loc_df[_kpi_col].first_valid_index()
+    _last_valid = loc_df[_kpi_col].last_valid_index()
+    start_ts = _first_valid.strftime("%Y-%m-%d %H:%M") if _first_valid is not None else "N/A"
+    end_ts = _last_valid.strftime("%Y-%m-%d %H:%M") if _last_valid is not None else "N/A"
 
     st.caption("Current filter KPIs")
     mc1, mc2, mc3 = st.columns(3)
@@ -1576,7 +1612,11 @@ else:
     with mc2:
         st.metric("End date", end_ts)
     with mc3:
-        st.metric("Total records (filtered)", f"{len(loc_df):,}")
+        # Use non-null count on the primary compare column so locations
+        # where data starts later (e.g. Charlton from 2022) don't report
+        # the full index length which includes NaN-filled rows.
+        _count_col = loc_meta["compare_col"] if loc_meta["compare_col"] in loc_df.columns else loc_df.columns[0]
+        st.metric("Total records (filtered)", f"{int(loc_df[_count_col].count()):,}")
 
     st.markdown("#### Descriptive statistics")
     desc = build_descriptive_stats(loc_df)
@@ -1618,7 +1658,7 @@ else:
     record_series = loc_df_full[record_count_col].dropna()
     record_colour = colour_map.get(record_count_col, default_colour)
     st.caption(
-        f"Annual non-null record counts for {get_display_series_name(record_count_col, flow_unit=loc_meta['flow_unit'])} in the selected date range."
+        f"Annual non-null record counts for {get_display_series_name(record_count_col, flow_unit=loc_meta['flow_unit'], loc_flow_unit=loc_meta['flow_unit'])} in the selected date range."
     )
     if record_series.empty:
         st.info("No records for that series in the selected date range.")
@@ -1638,7 +1678,7 @@ else:
     seasonal_col = st.selectbox(
         "Column to compare across seasons",
         options=list(loc_df.columns),
-        format_func=lambda col: get_display_series_name(col, flow_unit),
+        format_func=lambda col: get_display_series_name(col, flow_unit, loc_meta["flow_unit"]),
         key=f"{view_mode}_seasonal_col",
     )
     st.caption(
@@ -1647,9 +1687,10 @@ else:
     fig_seasonal = build_seasonal_trend_chart(
         loc_df[seasonal_col],
         seasonal_col,
-        f"{view_mode} – {get_display_series_name(seasonal_col, flow_unit)} Seasonal Trend",
+        f"{view_mode} – {get_display_series_name(seasonal_col, flow_unit, loc_meta['flow_unit'])} Seasonal Trend",
         LOCATION_COLOURS.get(view_mode, default_colour),
         flow_unit,
+        loc_flow_unit=loc_meta["flow_unit"],
     )
     if fig_seasonal is None:
         st.info("No seasonal data is available for that column in the selected date range.")
@@ -1691,7 +1732,8 @@ else:
     if trend_view == "Separated (actual units)":
         has_two_rows = bool(flow_cols and pressure_cols)
         nrows = 2 if has_two_rows else 1
-        flow_label = get_flow_axis_label(flow_cols, flow_unit)
+        loc_flow_unit = loc_meta["flow_unit"]
+        flow_label = get_flow_axis_label(flow_cols, flow_unit, loc_flow_unit)
         fig_trend = make_subplots(
             rows=nrows, cols=1, shared_xaxes=True, vertical_spacing=0.06
         )
@@ -1707,9 +1749,9 @@ else:
                 target_row = 2
 
             y_vals = plot_data[col]
-            trace_name = f"{get_display_series_name(col, flow_unit)} ({agg_choice} avg)"
+            trace_name = f"{get_display_series_name(col, flow_unit, loc_flow_unit)} ({agg_choice} avg)"
             if col in flow_cols:
-                y_vals = get_display_series_values(y_vals, col, flow_unit)
+                y_vals = get_display_series_values(y_vals, col, flow_unit, loc_flow_unit)
 
             fig_trend.add_trace(
                 go.Scatter(
@@ -1740,6 +1782,7 @@ else:
             fig_trend, f"{view_mode} – {agg_choice.lower()} averages"
         )
     else:
+        loc_flow_unit = loc_meta["flow_unit"]
         span = (plot_data.max() - plot_data.min()).replace(0, pd.NA)
         normalized = ((plot_data - plot_data.min()) / span).fillna(0.0)
         fig_trend = go.Figure()
@@ -1750,7 +1793,7 @@ else:
                     x=normalized.index,
                     y=normalized[col],
                     mode="lines",
-                    name=f"{get_display_series_name(col, flow_unit)} ({agg_choice} avg)",
+                    name=f"{get_display_series_name(col, flow_unit, loc_flow_unit)} ({agg_choice} avg)",
                     line=dict(color=base_col, width=2.2),
                 )
             )
@@ -1769,18 +1812,21 @@ else:
         )
     st.plotly_chart(fig_trend, width="stretch")
 
+    loc_flow_unit = loc_meta["flow_unit"]
+
     # --------------------------------------------------
     # 2. Daily averages
     # --------------------------------------------------
     st.markdown("## Daily averages")
 
-    daily = loc_df.resample("D").mean()
+    daily = loc_df.resample("D").mean().dropna(how="all")
     fig_daily = build_stacked_line_chart(
         daily,
         f"{view_mode} – Daily Averages",
-        "Year",
+        "Date",
         colour_map,
         flow_unit=flow_unit,
+        loc_flow_unit=loc_flow_unit,
     )
     st.plotly_chart(fig_daily, width="stretch")
 
@@ -1789,13 +1835,14 @@ else:
     # --------------------------------------------------
     st.markdown("## Monthly averages (multi-year seasonality)")
 
-    monthly = loc_df.resample("ME").mean()
+    monthly = loc_df.resample("ME").mean().dropna(how="all")
     fig_monthly = build_stacked_line_chart(
         monthly,
         f"{view_mode} – Monthly Averages",
-        "Year",
+        "Date",
         colour_map,
         flow_unit=flow_unit,
+        loc_flow_unit=loc_flow_unit,
     )
     st.plotly_chart(fig_monthly, width="stretch")
 
@@ -1817,6 +1864,7 @@ else:
         "Month",
         colour_map,
         flow_unit=flow_unit,
+        loc_flow_unit=loc_flow_unit,
         mode="lines+markers",
         marker_size=8,
     )
@@ -1834,6 +1882,7 @@ else:
         "Hour",
         colour_map,
         flow_unit=flow_unit,
+        loc_flow_unit=loc_flow_unit,
         mode="lines+markers",
         marker_size=7,
     )
@@ -1851,15 +1900,16 @@ else:
     selected_box_col = st.selectbox(
         "Series to show",
         options=value_cols,
-        format_func=lambda col: get_display_series_name(col, flow_unit),
+        format_func=lambda col: get_display_series_name(col, flow_unit, loc_flow_unit),
         key=f"{view_mode}_box_series",
     )
     fig_box = build_yearly_box_plot(
         df_year,
         selected_box_col,
-        f"{view_mode} – {get_display_series_name(selected_box_col, flow_unit)} Distribution by Year",
+        f"{view_mode} – {get_display_series_name(selected_box_col, flow_unit, loc_flow_unit)} Distribution by Year",
         colour_map.get(selected_box_col, default_colour),
         flow_unit=flow_unit,
+        loc_flow_unit=loc_flow_unit,
     )
     st.plotly_chart(fig_box, width="stretch")
 
