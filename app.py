@@ -1844,7 +1844,7 @@ FREQ_MAP = {
     "Hourly": "h",
     "Daily": "D",
     "Weekly": "W",
-    "Monthly": "M",
+    "Monthly": "ME",
 }
 
 
@@ -1977,7 +1977,7 @@ if is_compare:
 
     elif compare_section == "Monthly averages":
         st.markdown("## Monthly averages (multi-year seasonality)")
-        compare_monthly = build_compare_resampled_df("M", start_date, end_date, remove_outliers)
+        compare_monthly = build_compare_resampled_df("ME", start_date, end_date, remove_outliers)
         fig_monthly = build_comparison_chart(
             compare_monthly, "Monthly Average Flow", "Year"
         )
@@ -2445,7 +2445,7 @@ else:
     # --------------------------------------------------
     st.markdown("## Monthly averages (multi-year seasonality)")
 
-    monthly = loc_df.resample("M").mean().dropna(how="all")
+    monthly = loc_df.resample("ME").mean().dropna(how="all")
     fig_monthly = build_stacked_line_chart(
         monthly,
         f"{view_mode} – Monthly Averages",
