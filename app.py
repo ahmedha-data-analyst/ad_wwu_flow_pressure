@@ -124,6 +124,8 @@ SEASON_MARKER_SYMBOLS = {
 LOCATIONS = {
     "Great Hele": {
         "file": "great_hele_combined.parquet",
+        # NOTE: Village centre is ~50.81, -3.43; gas infrastructure coords may differ.
+        # Verify against WWU site records if map placement looks wrong.
         "lat": 50.98,
         "lon": -3.60,
         "compare_col": "Flow (Scmh)",
@@ -174,6 +176,9 @@ LOCATIONS = {
     },
     "Enfield": {
         "file": "enfield_charlton_cleaned.parquet",
+        # UNVERIFIED COORDINATES: No public place named "Enfield" found in Gloucestershire.
+        # These coordinates fall in the Stroud district. Confirm exact site location
+        # with WWU source data / GIS records before using for precise mapping.
         "lat": 51.62,
         "lon": -2.20,
         "compare_col": "Enfield flow (F1)",
@@ -522,6 +527,40 @@ def refresh_location_caches():
 refresh_location_caches()
 
 
+# ======================================================
+# OUTLIER DETECTION – 3×IQR per column
+# ======================================================
+@st.cache_data(max_entries=8)
+def compute_iqr_bounds(name: str) -> dict:
+    """Return per-column (lower, upper) 3×IQR bounds computed on the full dataset.
+
+    Bounds are fixed from the entire dataset so they don't shift as the user
+    scrolls the date range slider — this keeps the definition of "outlier"
+    stable and transparent.
+    """
+    df = load_location(name)
+    bounds = {}
+    for col in df.select_dtypes(include="number").columns:
+        q1 = float(df[col].quantile(0.25))
+        q3 = float(df[col].quantile(0.75))
+        iqr = q3 - q1
+        bounds[col] = (q1 - 3.0 * iqr, q3 + 3.0 * iqr)
+    return bounds
+
+
+def apply_outlier_filter(df: pd.DataFrame, bounds: dict) -> pd.DataFrame:
+    """Mask outlier values to NaN per column (rows are kept, not dropped).
+
+    Masking per-column rather than dropping rows ensures that a pressure
+    outlier doesn't also erase a perfectly valid simultaneous flow reading.
+    """
+    df = df.copy()
+    for col, (lo, hi) in bounds.items():
+        if col in df.columns:
+            df.loc[(df[col] < lo) | (df[col] > hi), col] = float("nan")
+    return df
+
+
 def encode_logo_to_base64(path: Path):
     if not path.exists():
         return ""
@@ -572,6 +611,17 @@ start_date, end_date = st.sidebar.slider(
     format="YYYY-MM-DD",
 )
 
+st.sidebar.markdown("---")
+remove_outliers = st.sidebar.toggle(
+    "Remove outliers (3×IQR)",
+    value=True,
+    help=(
+        "Masks readings outside Q1 − 3×IQR … Q3 + 3×IQR per column. "
+        "Bounds are calculated once from the **full** dataset so the "
+        "definition of 'outlier' stays stable as you adjust the date window."
+    ),
+)
+
 
 # ======================================================
 # FILTER DATA
@@ -590,13 +640,33 @@ def filter_by_date(dataframe, start, end):
     return dataframe.loc[start_ts:end_ts]
 
 
+def _get_compare_series_filtered(name: str, filter_outliers: bool) -> pd.Series:
+    """Return the compare series for a location, optionally with outliers masked.
+
+    Bounds are computed from the series itself (full dataset) so this works for
+    all COMPARE_SERIES keys, including those like 'Enfield flow (F1)' that don't
+    match a LOCATIONS key directly.
+    """
+    series = load_compare_series(name)
+    if filter_outliers:
+        q1 = float(series.quantile(0.25))
+        q3 = float(series.quantile(0.75))
+        iqr = q3 - q1
+        lo, hi = q1 - 3.0 * iqr, q3 + 3.0 * iqr
+        series = series.copy()
+        series[(series < lo) | (series > hi)] = float("nan")
+    return series
+
+
 @st.cache_data(max_entries=8)
-def build_compare_summary_data(start, end):
+def build_compare_summary_data(start, end, filter_outliers: bool = True):
     rows = []
     total_recs = 0
 
     for name in COMPARE_SERIES:
-        series = filter_by_date(load_compare_series(name), start, end).dropna()
+        series = filter_by_date(
+            _get_compare_series_filtered(name, filter_outliers), start, end
+        ).dropna()
         count = int(series.count())
         total_recs += count
 
@@ -640,10 +710,12 @@ def build_compare_summary_data(start, end):
 
 
 @st.cache_data(max_entries=16)
-def build_compare_resampled_df(freq, start, end):
+def build_compare_resampled_df(freq, start, end, filter_outliers: bool = True):
     frames = {}
     for name in COMPARE_SERIES:
-        series = filter_by_date(load_compare_series(name), start, end)
+        series = filter_by_date(
+            _get_compare_series_filtered(name, filter_outliers), start, end
+        )
         if freq != "1min":
             series = series.resample(freq).mean()
         frames[name] = series.astype("float32")
@@ -651,10 +723,12 @@ def build_compare_resampled_df(freq, start, end):
 
 
 @st.cache_data(max_entries=8)
-def build_compare_pattern_df(pattern, start, end):
+def build_compare_pattern_df(pattern, start, end, filter_outliers: bool = True):
     frames = {}
     for name in COMPARE_SERIES:
-        series = filter_by_date(load_compare_series(name), start, end).dropna()
+        series = filter_by_date(
+            _get_compare_series_filtered(name, filter_outliers), start, end
+        ).dropna()
         if pattern == "month":
             grouped = series.groupby(series.index.month).mean()
         else:
@@ -706,7 +780,7 @@ def select_time_focus(dataframe, key_prefix):
 
 
 if is_compare:
-    compare_total_recs, compare_summary = build_compare_summary_data(start_date, end_date)
+    compare_total_recs, compare_summary = build_compare_summary_data(start_date, end_date, remove_outliers)
 else:
     loc_df_full = filter_by_date(loc_df_raw, start_date, end_date)
     if loc_df_full.empty:
@@ -724,6 +798,16 @@ else:
         st.sidebar.error("Please select at least one series.")
         st.stop()
     loc_df = loc_df_full[selected_cols]
+
+    # Apply outlier filter (masks values to NaN, keeps row timestamps intact)
+    if remove_outliers:
+        _null_before = int(loc_df.isnull().sum().sum())
+        _iqr_bounds = compute_iqr_bounds(view_mode)
+        loc_df = apply_outlier_filter(loc_df, _iqr_bounds)
+        _null_after = int(loc_df.isnull().sum().sum())
+        _n_masked = _null_after - _null_before
+        if _n_masked > 0:
+            st.sidebar.caption(f"↳ {_n_masked:,} outlier readings masked")
 
 
 # Sidebar record count
@@ -876,6 +960,14 @@ def get_display_series_values(series, col, flow_unit, loc_flow_unit=None):
     return series
 
 
+def get_display_value(value, col, flow_unit, loc_flow_unit=None):
+    if pd.isna(value):
+        return value
+    if flow_unit == "kScmh" and is_native_scmh_series(col, loc_flow_unit):
+        return value / 1000.0
+    return value
+
+
 def get_flow_axis_label(flow_cols, flow_unit, loc_flow_unit=None):
     if not flow_cols:
         return "Value"
@@ -916,17 +1008,77 @@ def get_series_axis_label(col, flow_unit, loc_flow_unit=None):
     return "Value"
 
 
-def build_yearly_box_plot(df_year, selected_col, title, colour, flow_unit="Kscmh", loc_flow_unit=None):
+def build_yearly_box_plot(
+    df_year,
+    selected_col,
+    title,
+    colour,
+    flow_unit="Kscmh",
+    loc_flow_unit=None,
+):
     plot_name = get_display_series_name(selected_col, flow_unit, loc_flow_unit)
-    y_vals = get_display_series_values(df_year[selected_col], selected_col, flow_unit, loc_flow_unit)
+    y_vals = get_display_series_values(
+        df_year[selected_col], selected_col, flow_unit, loc_flow_unit
+    )
+    stats_df = pd.DataFrame({"Year": df_year.index.year, "Value": y_vals}).dropna()
+    if stats_df.empty:
+        return None
+
+    grouped = stats_df.groupby("Year")["Value"]
+    summary = grouped.agg(count="count", mean="mean", min="min", max="max")
+    quantiles = grouped.quantile([0.25, 0.5, 0.75]).unstack()
+    quantiles = quantiles.rename(columns={0.25: "q1", 0.5: "median", 0.75: "q3"})
+    summary = summary.join(quantiles)
+
+    iqr = summary["q3"] - summary["q1"]
+    lower_bounds = summary["q1"] - 1.5 * iqr
+    upper_bounds = summary["q3"] + 1.5 * iqr
+    lower_fences = []
+    upper_fences = []
+    for year, year_values in grouped:
+        inlier_values = year_values[
+            (year_values >= lower_bounds.loc[year])
+            & (year_values <= upper_bounds.loc[year])
+        ]
+        if inlier_values.empty:
+            lower_fences.append(float(year_values.min()))
+            upper_fences.append(float(year_values.max()))
+        else:
+            lower_fences.append(float(inlier_values.min()))
+            upper_fences.append(float(inlier_values.max()))
+
+    summary["lowerfence"] = lower_fences
+    summary["upperfence"] = upper_fences
+    summary = summary.reset_index()
+    summary["Year"] = summary["Year"].astype(str)
 
     fig = go.Figure()
     fig.add_trace(
         go.Box(
-            x=df_year["Year"],
-            y=y_vals,
+            x=summary["Year"],
+            q1=summary["q1"],
+            median=summary["median"],
+            q3=summary["q3"],
+            lowerfence=summary["lowerfence"],
+            upperfence=summary["upperfence"],
+            mean=summary["mean"],
+            customdata=summary[
+                ["count", "min", "q1", "median", "q3", "max", "mean"]
+            ].to_numpy(),
+            hovertemplate=(
+                "<b>Year %{x}</b><br>"
+                "Count %{customdata[0]:,.0f}<br>"
+                "Min %{customdata[1]:,.4f}<br>"
+                "Q1 %{customdata[2]:,.4f}<br>"
+                "Median %{customdata[3]:,.4f}<br>"
+                "Q3 %{customdata[4]:,.4f}<br>"
+                "Max %{customdata[5]:,.4f}<br>"
+                "Mean %{customdata[6]:,.4f}<extra></extra>"
+            ),
             name=plot_name,
             marker_color=colour,
+            line=dict(color=colour),
+            fillcolor=blend_hex(colour, PANEL_BG, 0.30),
             boxmean=True,
             boxpoints=False,
         )
@@ -934,6 +1086,11 @@ def build_yearly_box_plot(df_year, selected_col, title, colour, flow_unit="Kscmh
     fig.update_layout(
         xaxis_title="Year",
         yaxis_title=get_series_axis_label(selected_col, flow_unit, loc_flow_unit),
+    )
+    fig.update_xaxes(
+        type="category",
+        categoryorder="array",
+        categoryarray=summary["Year"].tolist(),
     )
     return apply_dark_layout(fig, title)
 
@@ -1010,66 +1167,188 @@ def get_location_season_colours(base_colour):
     }
 
 
-def build_seasonal_trend_chart(series, col, title, base_colour, flow_unit, loc_flow_unit=None):
-    display_series = get_display_series_values(series.dropna(), col, flow_unit, loc_flow_unit)
+def get_season_window_bounds(season, season_year, tz=None):
+    season_year = int(season_year)
+    if season == "Winter":
+        start = pd.Timestamp(year=season_year - 1, month=12, day=1)
+        end = pd.Timestamp(year=season_year, month=3, day=1) - pd.Timedelta(days=1)
+    elif season == "Spring":
+        start = pd.Timestamp(year=season_year, month=3, day=1)
+        end = pd.Timestamp(year=season_year, month=6, day=1) - pd.Timedelta(days=1)
+    elif season == "Summer":
+        start = pd.Timestamp(year=season_year, month=6, day=1)
+        end = pd.Timestamp(year=season_year, month=9, day=1) - pd.Timedelta(days=1)
+    else:
+        start = pd.Timestamp(year=season_year, month=9, day=1)
+        end = pd.Timestamp(year=season_year, month=12, day=1) - pd.Timedelta(days=1)
+    if tz is not None:
+        start = start.tz_localize(tz)
+        end = end.tz_localize(tz)
+    return start.normalize(), end.normalize()
+
+
+def build_seasonal_summary_df(series, col, flow_unit, loc_flow_unit=None):
+    display_series = get_display_series_values(
+        series.dropna(), col, flow_unit, loc_flow_unit
+    )
     if display_series.empty:
-        return None
+        return pd.DataFrame()
 
     daily = display_series.resample("D").mean().dropna()
     if daily.empty:
-        return None
+        return pd.DataFrame()
 
-    seasonal_df = daily.to_frame(name="value")
-    seasonal_df["Season"] = [SEASON_BY_MONTH[m] for m in seasonal_df.index.month]
+    seasonal_df = daily.to_frame(name="Value")
+    seasonal_df["Season"] = seasonal_df.index.month.map(SEASON_BY_MONTH)
     seasonal_df["SeasonYear"] = (
         seasonal_df.index.year + (seasonal_df.index.month == 12).astype(int)
     )
-    seasonal_avg = (
-        seasonal_df.groupby(["SeasonYear", "Season"])["value"]
-        .mean()
-        .unstack("Season")
-        .reindex(columns=SEASON_ORDER)
-        .dropna(how="all")
-    )
 
-    if seasonal_avg.empty:
-        return None
+    seasonal_summary = (
+        seasonal_df.groupby(["SeasonYear", "Season"])
+        .agg(
+            MeanValue=("Value", "mean"),
+            ObservedDays=("Value", "count"),
+        )
+        .reset_index()
+    )
+    if seasonal_summary.empty:
+        return seasonal_summary
+
+    series_tz = daily.index.tz
+    available_start = daily.index.min().normalize()
+    available_end = daily.index.max().normalize()
+
+    window_starts = []
+    window_ends = []
+    expected_days = []
+    for season_year, season in zip(
+        seasonal_summary["SeasonYear"], seasonal_summary["Season"]
+    ):
+        season_start, season_end = get_season_window_bounds(
+            season, season_year, tz=series_tz
+        )
+        overlap_start = max(season_start, available_start)
+        overlap_end = min(season_end, available_end)
+        if overlap_end < overlap_start:
+            window_starts.append(pd.NaT)
+            window_ends.append(pd.NaT)
+            expected_days.append(0)
+        else:
+            window_starts.append(overlap_start)
+            window_ends.append(overlap_end)
+            expected_days.append((overlap_end - overlap_start).days + 1)
+
+    seasonal_summary["WindowStart"] = window_starts
+    seasonal_summary["WindowEnd"] = window_ends
+    seasonal_summary["ExpectedDays"] = expected_days
+    seasonal_summary["CoveragePct"] = (
+        100.0 * seasonal_summary["ObservedDays"] / seasonal_summary["ExpectedDays"]
+    ).fillna(0.0)
+    seasonal_summary["MarkerSize"] = (
+        7.0
+        + 4.5
+        * seasonal_summary["CoveragePct"].clip(lower=45.0, upper=100.0).sub(45.0)
+        / 55.0
+    )
+    seasonal_summary["Season"] = pd.Categorical(
+        seasonal_summary["Season"], categories=SEASON_ORDER, ordered=True
+    )
+    seasonal_summary = seasonal_summary.sort_values(
+        ["SeasonYear", "Season"]
+    ).reset_index(drop=True)
+    return seasonal_summary
+
+
+def build_seasonal_trend_chart(series, col, title, base_colour, flow_unit, loc_flow_unit=None):
+    seasonal_summary = build_seasonal_summary_df(
+        series, col, flow_unit, loc_flow_unit
+    )
+    if seasonal_summary.empty:
+        return None, seasonal_summary
 
     season_colours = get_location_season_colours(base_colour)
+    full_years = list(
+        range(
+            int(seasonal_summary["SeasonYear"].min()),
+            int(seasonal_summary["SeasonYear"].max()) + 1,
+        )
+    )
+    yaxis_label = get_series_axis_label(col, flow_unit, loc_flow_unit)
     fig = go.Figure()
     for season in SEASON_ORDER:
-        if season not in seasonal_avg.columns:
+        season_frame = (
+            seasonal_summary[seasonal_summary["Season"] == season]
+            .set_index("SeasonYear")
+            .reindex(full_years)
+        )
+        if season_frame["MeanValue"].notna().sum() == 0:
             continue
-        season_vals = seasonal_avg[season].dropna()
-        if season_vals.empty:
-            continue
+
+        window_start_labels = season_frame["WindowStart"].apply(
+            lambda ts: ts.strftime("%Y-%m-%d") if pd.notna(ts) else ""
+        )
+        window_end_labels = season_frame["WindowEnd"].apply(
+            lambda ts: ts.strftime("%Y-%m-%d") if pd.notna(ts) else ""
+        )
+        customdata = pd.DataFrame(
+            {
+                "window_start": window_start_labels,
+                "window_end": window_end_labels,
+                "observed_days": season_frame["ObservedDays"].fillna(0.0),
+                "expected_days": season_frame["ExpectedDays"].fillna(0.0),
+                "coverage_pct": season_frame["CoveragePct"].fillna(0.0),
+            }
+        ).to_numpy()
+
         fig.add_trace(
             go.Scatter(
-                x=season_vals.index,
-                y=season_vals.values,
+                x=full_years,
+                y=season_frame["MeanValue"],
                 mode="lines+markers",
                 name=season,
                 line=dict(
                     color=season_colours[season],
-                    width=2.6,
+                    width=2.8,
                     dash=SEASON_LINE_DASHES[season],
                 ),
-                marker=dict(size=8, symbol=SEASON_MARKER_SYMBOLS[season]),
+                marker=dict(
+                    size=season_frame["MarkerSize"].fillna(0.0).tolist(),
+                    symbol=SEASON_MARKER_SYMBOLS[season],
+                    color=season_colours[season],
+                    line=dict(
+                        color=blend_hex(season_colours[season], TEXT_COL, 0.22),
+                        width=1.1,
+                    ),
+                ),
+                customdata=customdata,
+                connectgaps=False,
                 hovertemplate=(
-                    f"{season}<br>Season year %{{x}}<br>"
-                    f"{get_series_axis_label(col, flow_unit, loc_flow_unit)} %{{y:,.4f}}<extra></extra>"
+                    f"<b>{season}</b><br>"
+                    "Season year %{x}<br>"
+                    f"{yaxis_label} %{{y:,.4f}}<br>"
+                    "Window %{customdata[0]} → %{customdata[1]}<br>"
+                    "Observed %{customdata[2]:,.0f} of %{customdata[3]:,.0f} days<br>"
+                    "Coverage %{customdata[4]:.1f}%<extra></extra>"
                 ),
             )
         )
 
     if not fig.data:
-        return None
+        return None, seasonal_summary
 
     fig.update_layout(
         xaxis_title="Season year",
-        yaxis_title=get_series_axis_label(col, flow_unit, loc_flow_unit),
+        yaxis_title=yaxis_label,
+        legend_title_text="Season",
     )
-    return apply_dark_layout(fig, title)
+    fig = apply_dark_layout(fig, title)
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=full_years,
+        ticktext=[str(year) for year in full_years],
+    )
+    return fig, seasonal_summary
 
 
 def get_location_correlation_scale(base_colour):
@@ -1107,6 +1386,182 @@ def build_correlation_heatmap(corr_df, title, base_colour=None):
     fig = apply_dark_layout(fig, title)
     fig.update_coloraxes(colorbar_title="Correlation")
     return fig
+
+
+# ======================================================
+# HELPER: THRESHOLD EXPLORER CHART
+# ======================================================
+def build_threshold_explorer_chart(
+    df,
+    threshold_col,
+    pct,
+    side,
+    title,
+    colour_map,
+    flow_unit="Kscmh",
+    loc_flow_unit=None,
+    freq="D",
+    comparison_view="Separated (actual units)",
+    trace_name_suffix="",
+):
+    """
+    Filter df to rows where threshold_col is in the chosen extreme (top/bottom/both
+    percentile), optionally resample, then plot all columns.
+
+    Returns (fig, cutoff_label, n_rows_in_filter, raw_points, plotted_points, thin_step).
+    """
+    q = pct / 100.0
+    if side.startswith("Top"):
+        cutoff = float(df[threshold_col].quantile(1.0 - q))
+        mask = df[threshold_col] >= cutoff
+        display_cutoff = get_display_value(
+            cutoff, threshold_col, flow_unit, loc_flow_unit
+        )
+        cutoff_lines = [
+            {
+                "value": display_cutoff,
+                "annotation_text": f"Threshold (≥ {display_cutoff:,.3g}, P{100 - pct})",
+                "annotation_position": "top right",
+            }
+        ]
+        cutoff_label = f"≥ {display_cutoff:,.3g} (P{100 - pct})"
+    elif side.startswith("Bottom"):
+        cutoff = float(df[threshold_col].quantile(q))
+        mask = df[threshold_col] <= cutoff
+        display_cutoff = get_display_value(
+            cutoff, threshold_col, flow_unit, loc_flow_unit
+        )
+        cutoff_lines = [
+            {
+                "value": display_cutoff,
+                "annotation_text": f"Threshold (≤ {display_cutoff:,.3g}, P{pct})",
+                "annotation_position": "bottom right",
+            }
+        ]
+        cutoff_label = f"≤ {display_cutoff:,.3g} (P{pct})"
+    else:  # Both extremes
+        lo = float(df[threshold_col].quantile(q))
+        hi = float(df[threshold_col].quantile(1.0 - q))
+        mask = (df[threshold_col] <= lo) | (df[threshold_col] >= hi)
+        display_lo = get_display_value(lo, threshold_col, flow_unit, loc_flow_unit)
+        display_hi = get_display_value(hi, threshold_col, flow_unit, loc_flow_unit)
+        cutoff_lines = [
+            {
+                "value": display_lo,
+                "annotation_text": f"Lower threshold (≤ {display_lo:,.3g}, P{pct})",
+                "annotation_position": "bottom right",
+            },
+            {
+                "value": display_hi,
+                "annotation_text": f"Upper threshold (≥ {display_hi:,.3g}, P{100 - pct})",
+                "annotation_position": "top right",
+            },
+        ]
+        cutoff_label = f"≤ {display_lo:,.3g} or ≥ {display_hi:,.3g} (P{pct} / P{100 - pct})"
+
+    filtered = df[mask]
+    n_filtered = int(mask.sum())
+
+    if filtered.empty or n_filtered == 0:
+        return None, cutoff_label, 0, 0, 0, 1
+
+    if freq != "1min":
+        plot_df = filtered.resample(freq).mean().dropna(how="all")
+    else:
+        plot_df = filtered.dropna(how="all")
+
+    if plot_df.empty:
+        return None, cutoff_label, n_filtered, 0, 0, 1
+
+    raw_points = len(plot_df)
+    plot_df, thin_step = thin_time_series(plot_df)
+    plotted_points = len(plot_df)
+
+    if plot_df.empty:
+        return None, cutoff_label, n_filtered, raw_points, 0, thin_step
+
+    default_colour = get_colour_fallback(colour_map)
+    time_hover_format = "%Y-%m-%d %H:%M" if freq in {"1min", "15min", "30min", "h"} else "%Y-%m-%d"
+
+    if comparison_view == "Separated (actual units)":
+        flow_cols, pressure_cols, _ = split_series_columns(plot_df.columns)
+        has_two_rows = bool(flow_cols and pressure_cols)
+        nrows = 2 if has_two_rows else 1
+        flow_label = get_flow_axis_label(flow_cols, flow_unit, loc_flow_unit)
+
+        fig = make_subplots(rows=nrows, cols=1, shared_xaxes=True, vertical_spacing=0.08)
+
+        for col in plot_df.columns:
+            base_col = colour_map.get(col, default_colour)
+            is_pressure = col in pressure_cols
+            row = 2 if (has_two_rows and is_pressure) else 1
+            y_vals = get_display_series_values(plot_df[col], col, flow_unit, loc_flow_unit)
+            display_name = (
+                f"{get_display_series_name(col, flow_unit, loc_flow_unit)}{trace_name_suffix}"
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_df.index,
+                    y=y_vals,
+                    mode="lines",
+                    name=display_name,
+                    line=dict(color=base_col, width=2.2),
+                    hovertemplate=(
+                        f"<b>{display_name}</b><br>%{{x|{time_hover_format}}}"
+                        f"<br>%{{y:,.3g}}<extra></extra>"
+                    ),
+                ),
+                row=row,
+                col=1,
+            )
+
+            if col == threshold_col:
+                for cutoff_line in cutoff_lines:
+                    fig.add_hline(
+                        y=cutoff_line["value"],
+                        line_dash="dash",
+                        line_color=ACCENT_COLOUR,
+                        annotation_text=cutoff_line["annotation_text"],
+                        annotation_position=cutoff_line["annotation_position"],
+                        annotation_font_color=ACCENT_COLOUR,
+                        row=row,
+                        col=1,
+                    )
+
+        fig.update_yaxes(title_text=flow_label, row=1, col=1)
+        if has_two_rows:
+            fig.update_yaxes(title_text="Bar", row=2, col=1)
+    else:
+        span = (plot_df.max() - plot_df.min()).replace(0, pd.NA)
+        normalized = ((plot_df - plot_df.min()) / span).fillna(0.0)
+        fig = go.Figure()
+        for col in normalized.columns:
+            base_col = colour_map.get(col, default_colour)
+            display_name = (
+                f"{get_display_series_name(col, flow_unit, loc_flow_unit)}{trace_name_suffix}"
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=normalized.index,
+                    y=normalized[col],
+                    mode="lines",
+                    name=display_name,
+                    line=dict(color=base_col, width=2.2),
+                    hovertemplate=(
+                        f"<b>{display_name}</b><br>%{{x|{time_hover_format}}}"
+                        f"<br>%{{y:,.3f}}<extra></extra>"
+                    ),
+                )
+            )
+
+        fig.update_layout(xaxis_title="Time", yaxis_title="Normalized value (0-1)")
+
+    fig = apply_dark_layout(fig, title)
+    fig.update_layout(
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+
+    return fig, cutoff_label, n_filtered, raw_points, plotted_points, thin_step
 
 
 # ======================================================
@@ -1382,7 +1837,7 @@ FREQ_MAP = {
     "Hourly": "h",
     "Daily": "D",
     "Weekly": "W",
-    "Monthly": "ME",
+    "Monthly": "M",
 }
 
 
@@ -1472,7 +1927,7 @@ if is_compare:
             )
 
         compare_trend_df = build_compare_resampled_df(
-            FREQ_MAP[agg_choice], start_date, end_date
+            FREQ_MAP[agg_choice], start_date, end_date, remove_outliers
         )
         trend_source = (
             compare_trend_df
@@ -1509,13 +1964,13 @@ if is_compare:
 
     elif compare_section == "Daily averages":
         st.markdown("## Daily averages")
-        compare_daily = build_compare_resampled_df("D", start_date, end_date)
+        compare_daily = build_compare_resampled_df("D", start_date, end_date, remove_outliers)
         fig_daily = build_comparison_chart(compare_daily, "Daily Average Flow", "Year")
         st.plotly_chart(fig_daily, width="stretch")
 
     elif compare_section == "Monthly averages":
         st.markdown("## Monthly averages (multi-year seasonality)")
-        compare_monthly = build_compare_resampled_df("ME", start_date, end_date)
+        compare_monthly = build_compare_resampled_df("M", start_date, end_date, remove_outliers)
         fig_monthly = build_comparison_chart(
             compare_monthly, "Monthly Average Flow", "Year"
         )
@@ -1527,7 +1982,7 @@ if is_compare:
             "Jan", "Feb", "Mar", "Apr", "May", "Jun",
             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ]
-        monthly_pat = build_compare_pattern_df("month", start_date, end_date)
+        monthly_pat = build_compare_pattern_df("month", start_date, end_date, remove_outliers)
         monthly_pat.index = month_labels[: len(monthly_pat)]
         fig_mpat = build_comparison_chart(
             monthly_pat,
@@ -1540,7 +1995,7 @@ if is_compare:
 
     elif compare_section == "Average by hour of day":
         st.markdown("## Average by hour of day")
-        compare_hourly_pat = build_compare_pattern_df("hour", start_date, end_date)
+        compare_hourly_pat = build_compare_pattern_df("hour", start_date, end_date, remove_outliers)
         fig_hpat = build_comparison_chart(
             compare_hourly_pat,
             "Average Flow by Hour of Day",
@@ -1552,8 +2007,7 @@ if is_compare:
 
     elif compare_section == "Distribution of daily flow by year":
         st.markdown("## Distribution of daily flow by year")
-        compare_daily_box = build_compare_resampled_df("D", start_date, end_date)
-        compare_daily_box["Year"] = compare_daily_box.index.year
+        compare_daily_box = build_compare_resampled_df("D", start_date, end_date, remove_outliers)
         box_location = st.selectbox(
             "Series to show",
             options=list(COMPARE_SERIES.keys()),
@@ -1568,18 +2022,22 @@ if is_compare:
             ),
             flow_unit="Kscmh",
         )
-        st.plotly_chart(fig_box, width="stretch")
+        if fig_box is None:
+            st.info("No data is available for that series in the selected date range.")
+        else:
+            st.caption("Built from precomputed yearly box statistics for faster loading.")
+            st.plotly_chart(fig_box, width="stretch")
 
     elif compare_section == "Correlation between flow series":
         st.markdown("## Correlation between flow series")
-        compare_corr = build_compare_resampled_df("D", start_date, end_date).corr()
+        compare_corr = build_compare_resampled_df("D", start_date, end_date, remove_outliers).corr()
         st.caption("Computed from daily mean flow series to keep compare mode responsive.")
         fig_corr = build_correlation_heatmap(compare_corr, "Correlation Between Flow Series")
         st.plotly_chart(fig_corr, width="stretch")
 
     else:
         st.markdown("## Raw data")
-        compare_raw = build_compare_resampled_df("1min", start_date, end_date)
+        compare_raw = build_compare_resampled_df("1min", start_date, end_date, remove_outliers)
         with st.expander("Show comparison data (first and last 100 rows)", expanded=True):
             show_head_tail_dataframe(compare_raw)
 
@@ -1671,34 +2129,127 @@ else:
         st.plotly_chart(fig_records, width="stretch")
 
     # --------------------------------------------------
-    # Seasonal trend by year
+    # Threshold Explorer
     # --------------------------------------------------
-    st.markdown("## Seasonal trend by year")
+    st.markdown("## Threshold Explorer")
 
-    seasonal_col = st.selectbox(
-        "Column to compare across seasons",
-        options=list(loc_df.columns),
-        format_func=lambda col: get_display_series_name(col, flow_unit, loc_meta["flow_unit"]),
-        key=f"{view_mode}_seasonal_col",
-    )
+    numeric_cols = list(loc_df.select_dtypes(include="number").columns)
     st.caption(
-        "Each point shows the mean of daily averages within that season. Winter groups December with the following January and February."
+        "Filter to timestamps where one selected series sits in an extreme percentile band, then compare how the other series behave."
     )
-    fig_seasonal = build_seasonal_trend_chart(
-        loc_df[seasonal_col],
-        seasonal_col,
-        f"{view_mode} – {get_display_series_name(seasonal_col, flow_unit, loc_meta['flow_unit'])} Seasonal Trend",
-        LOCATION_COLOURS.get(view_mode, default_colour),
-        flow_unit,
-        loc_flow_unit=loc_meta["flow_unit"],
-    )
-    if fig_seasonal is None:
-        st.info("No seasonal data is available for that column in the selected date range.")
+    if not numeric_cols:
+        st.info("No numeric series are available for threshold exploration.")
     else:
-        st.plotly_chart(fig_seasonal, width="stretch")
+        te_ctrl_a, te_ctrl_b, te_ctrl_c = st.columns(3)
+        with te_ctrl_a:
+            threshold_col = st.selectbox(
+                "Threshold column",
+                options=numeric_cols,
+                format_func=lambda c: get_display_series_name(
+                    c, flow_unit, loc_meta["flow_unit"]
+                ),
+                key=f"{view_mode}_te_col",
+            )
+        with te_ctrl_b:
+            threshold_pct = st.number_input(
+                "Percentile (%)",
+                min_value=1,
+                max_value=49,
+                value=10,
+                step=1,
+                key=f"{view_mode}_te_pct",
+                help="10 means the top 10%, bottom 10%, or both extremes depending on the option you choose.",
+            )
+        with te_ctrl_c:
+            threshold_side = st.selectbox(
+                "Which extreme?",
+                options=[
+                    "Top (above threshold)",
+                    "Bottom (below threshold)",
+                    "Both extremes",
+                ],
+                index=0,
+                key=f"{view_mode}_te_side",
+            )
+
+        te_ctrl_d, te_ctrl_e = st.columns(2)
+        with te_ctrl_d:
+            threshold_agg_choice = st.selectbox(
+                "Data granularity",
+                options=list(FREQ_MAP.keys()),
+                index=list(FREQ_MAP.keys()).index("Daily"),
+                key=f"{view_mode}_te_agg",
+            )
+        with te_ctrl_e:
+            threshold_view = st.selectbox(
+                "Comparison view",
+                options=["Separated (actual units)", "Normalized (0-1)"],
+                index=0,
+                key=f"{view_mode}_te_view",
+            )
+
+        threshold_col_display = get_display_series_name(
+            threshold_col, flow_unit, loc_meta["flow_unit"]
+        )
+        threshold_focus_text = {
+            "Top (above threshold)": f"top {int(threshold_pct)}%",
+            "Bottom (below threshold)": f"bottom {int(threshold_pct)}%",
+            "Both extremes": f"top and bottom {int(threshold_pct)}%",
+        }[threshold_side]
+        threshold_title = (
+            f"{view_mode} – Trends when {threshold_col_display} is in the "
+            f"{threshold_focus_text}"
+        )
+        if threshold_view == "Normalized (0-1)":
+            threshold_title += " (normalized)"
+
+        trace_name_suffix = (
+            "" if threshold_agg_choice == "1min" else f" ({threshold_agg_choice} avg)"
+        )
+        (
+            fig_thresh,
+            cutoff_label,
+            n_filtered,
+            raw_points,
+            plotted_points,
+            thin_step,
+        ) = build_threshold_explorer_chart(
+            df=loc_df,
+            threshold_col=threshold_col,
+            pct=int(threshold_pct),
+            side=threshold_side,
+            title=threshold_title,
+            colour_map=colour_map,
+            flow_unit=flow_unit,
+            loc_flow_unit=loc_meta["flow_unit"],
+            freq=FREQ_MAP[threshold_agg_choice],
+            comparison_view=threshold_view,
+            trace_name_suffix=trace_name_suffix,
+        )
+        if fig_thresh is None:
+            st.info("No data points meet the threshold condition for the selected date range.")
+        else:
+            pct_of_total = (n_filtered / max(int(loc_df[threshold_col].count()), 1)) * 100
+            aggregation_caption = (
+                "showing raw filtered timestamps"
+                if threshold_agg_choice == "1min"
+                else f"aggregated to {threshold_agg_choice.lower()} means"
+            )
+            st.caption(
+                f"Threshold: **{threshold_col_display} {cutoff_label}** · "
+                f"{n_filtered:,} readings ({pct_of_total:.1f}% of selected range) · "
+                f"{aggregation_caption}"
+            )
+            if threshold_view == "Normalized (0-1)":
+                st.caption("Each series is scaled independently to 0-1 for shape comparison.")
+            if thin_step > 1:
+                st.caption(
+                    f"To keep things fast, this chart shows {plotted_points:,} of {raw_points:,} points."
+                )
+            st.plotly_chart(fig_thresh, width="stretch")
 
     # --------------------------------------------------
-    # 1. Trend over time
+    # Trend over time
     # --------------------------------------------------
     st.markdown("## Trend over time")
 
@@ -1812,6 +2363,41 @@ else:
         )
     st.plotly_chart(fig_trend, width="stretch")
 
+    # --------------------------------------------------
+    # Seasonal trend by year
+    # --------------------------------------------------
+    st.markdown("## Seasonal trend by year")
+
+    seasonal_col = st.selectbox(
+        "Column to compare across seasons",
+        options=list(loc_df.columns),
+        format_func=lambda col: get_display_series_name(col, flow_unit, loc_meta["flow_unit"]),
+        key=f"{view_mode}_seasonal_col",
+    )
+    st.caption(
+        "Each point shows the mean of daily averages within that season. Winter groups December with the following January and February."
+    )
+    fig_seasonal, seasonal_summary = build_seasonal_trend_chart(
+        loc_df[seasonal_col],
+        seasonal_col,
+        f"{view_mode} – {get_display_series_name(seasonal_col, flow_unit, loc_meta['flow_unit'])} Seasonal Trend",
+        LOCATION_COLOURS.get(view_mode, default_colour),
+        flow_unit,
+        loc_flow_unit=loc_meta["flow_unit"],
+    )
+    if fig_seasonal is None:
+        st.info("No seasonal data is available for that column in the selected date range.")
+    else:
+        st.caption(
+            "Hover any point to see the seasonal window and how many daily means contributed to that average. Larger markers indicate higher day coverage within that season."
+        )
+        partial_points = int((seasonal_summary["CoveragePct"] < 99.9).sum())
+        if partial_points > 0:
+            st.caption(
+                f"{partial_points} season-year point(s) have partial coverage because of the selected date range or missing data."
+            )
+        st.plotly_chart(fig_seasonal, width="stretch")
+
     loc_flow_unit = loc_meta["flow_unit"]
 
     # --------------------------------------------------
@@ -1835,7 +2421,7 @@ else:
     # --------------------------------------------------
     st.markdown("## Monthly averages (multi-year seasonality)")
 
-    monthly = loc_df.resample("ME").mean().dropna(how="all")
+    monthly = loc_df.resample("M").mean().dropna(how="all")
     fig_monthly = build_stacked_line_chart(
         monthly,
         f"{view_mode} – Monthly Averages",
@@ -1893,9 +2479,7 @@ else:
     # --------------------------------------------------
     st.markdown("## Distribution of values by year")
 
-    df_year = loc_df.copy()
-    df_year["Year"] = df_year.index.year
-    value_cols = [c for c in df_year.columns if c != "Year"]
+    value_cols = list(loc_df.columns)
 
     selected_box_col = st.selectbox(
         "Series to show",
@@ -1904,14 +2488,18 @@ else:
         key=f"{view_mode}_box_series",
     )
     fig_box = build_yearly_box_plot(
-        df_year,
+        loc_df,
         selected_box_col,
         f"{view_mode} – {get_display_series_name(selected_box_col, flow_unit, loc_flow_unit)} Distribution by Year",
         colour_map.get(selected_box_col, default_colour),
         flow_unit=flow_unit,
         loc_flow_unit=loc_flow_unit,
     )
-    st.plotly_chart(fig_box, width="stretch")
+    if fig_box is None:
+        st.info("No data is available for that series in the selected date range.")
+    else:
+        st.caption("Built from precomputed yearly box statistics for faster loading.")
+        st.plotly_chart(fig_box, width="stretch")
 
     # --------------------------------------------------
     # 7. Correlation heatmap
