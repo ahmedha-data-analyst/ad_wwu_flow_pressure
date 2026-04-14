@@ -616,9 +616,9 @@ remove_outliers = st.sidebar.toggle(
     "Remove outliers (3×IQR)",
     value=True,
     help=(
-        "Masks readings outside Q1 − 3×IQR … Q3 + 3×IQR per column. "
-        "Bounds are calculated once from the **full** dataset so the "
-        "definition of 'outlier' stays stable as you adjust the date window."
+        "For each series, the app finds the middle 50% of values "
+        "(the IQR) and hides readings below Q1 - 3×IQR or above "
+        "Q3 + 3×IQR."
     ),
 )
 
@@ -1095,8 +1095,15 @@ def build_yearly_box_plot(
     return apply_dark_layout(fig, title)
 
 
-def build_descriptive_stats(df):
-    desc = df.describe().T
+def build_descriptive_stats(df, flow_unit="Kscmh", loc_flow_unit=None):
+    display_df = pd.DataFrame(index=df.index)
+    for col in df.select_dtypes(include="number").columns:
+        display_name = get_display_series_name(col, flow_unit, loc_flow_unit)
+        display_df[display_name] = get_display_series_values(
+            df[col], col, flow_unit, loc_flow_unit
+        )
+
+    desc = display_df.describe().T
     if "50%" in desc.columns:
         desc.insert(2, "median", desc.pop("50%"))
     return desc
@@ -2076,8 +2083,16 @@ else:
         _count_col = loc_meta["compare_col"] if loc_meta["compare_col"] in loc_df.columns else loc_df.columns[0]
         st.metric("Total records (filtered)", f"{int(loc_df[_count_col].count()):,}")
 
+    flow_unit = loc_meta["flow_unit"]
+    if loc_meta["flow_unit"] == "Scmh":
+        flow_unit = st.session_state.get(f"{view_mode}_flow_unit", "kScmh")
+
     st.markdown("#### Descriptive statistics")
-    desc = build_descriptive_stats(loc_df)
+    desc = build_descriptive_stats(
+        loc_df,
+        flow_unit=flow_unit,
+        loc_flow_unit=loc_meta["flow_unit"],
+    )
     show_stretch_dataframe(
         desc.style.format(
             {
@@ -2094,13 +2109,12 @@ else:
         height=min(350, 80 + 28 * len(desc)),
     )
 
-    flow_unit = loc_meta["flow_unit"]
     if loc_meta["flow_unit"] == "Scmh":
         flow_unit = st.radio(
             "Flow display unit",
             options=["Scmh", "kScmh"],
             horizontal=True,
-            index=1,
+            index=0 if flow_unit == "Scmh" else 1,
             key=f"{view_mode}_flow_unit",
         )
 
@@ -2172,15 +2186,19 @@ else:
                 key=f"{view_mode}_te_side",
             )
 
-        te_ctrl_d, te_ctrl_e = st.columns(2)
+        te_ctrl_d, te_ctrl_e, te_ctrl_f = st.columns(3)
         with te_ctrl_d:
+            threshold_base, threshold_focus_caption = select_time_focus(
+                loc_df, key_prefix=f"{view_mode}_te"
+            )
+        with te_ctrl_e:
             threshold_agg_choice = st.selectbox(
                 "Data granularity",
                 options=list(FREQ_MAP.keys()),
                 index=list(FREQ_MAP.keys()).index("Daily"),
                 key=f"{view_mode}_te_agg",
             )
-        with te_ctrl_e:
+        with te_ctrl_f:
             threshold_view = st.selectbox(
                 "Comparison view",
                 options=["Separated (actual units)", "Normalized (0-1)"],
@@ -2188,65 +2206,71 @@ else:
                 key=f"{view_mode}_te_view",
             )
 
-        threshold_col_display = get_display_series_name(
-            threshold_col, flow_unit, loc_meta["flow_unit"]
-        )
-        threshold_focus_text = {
-            "Top (above threshold)": f"top {int(threshold_pct)}%",
-            "Bottom (below threshold)": f"bottom {int(threshold_pct)}%",
-            "Both extremes": f"top and bottom {int(threshold_pct)}%",
-        }[threshold_side]
-        threshold_title = (
-            f"{view_mode} – Trends when {threshold_col_display} is in the "
-            f"{threshold_focus_text}"
-        )
-        if threshold_view == "Normalized (0-1)":
-            threshold_title += " (normalized)"
-
-        trace_name_suffix = (
-            "" if threshold_agg_choice == "1min" else f" ({threshold_agg_choice} avg)"
-        )
-        (
-            fig_thresh,
-            cutoff_label,
-            n_filtered,
-            raw_points,
-            plotted_points,
-            thin_step,
-        ) = build_threshold_explorer_chart(
-            df=loc_df,
-            threshold_col=threshold_col,
-            pct=int(threshold_pct),
-            side=threshold_side,
-            title=threshold_title,
-            colour_map=colour_map,
-            flow_unit=flow_unit,
-            loc_flow_unit=loc_meta["flow_unit"],
-            freq=FREQ_MAP[threshold_agg_choice],
-            comparison_view=threshold_view,
-            trace_name_suffix=trace_name_suffix,
-        )
-        if fig_thresh is None:
-            st.info("No data points meet the threshold condition for the selected date range.")
+        if threshold_base.empty:
+            st.info("No data in this period. Pick a different year/month/day.")
         else:
-            pct_of_total = (n_filtered / max(int(loc_df[threshold_col].count()), 1)) * 100
-            aggregation_caption = (
-                "showing raw filtered timestamps"
-                if threshold_agg_choice == "1min"
-                else f"aggregated to {threshold_agg_choice.lower()} means"
+            threshold_col_display = get_display_series_name(
+                threshold_col, flow_unit, loc_meta["flow_unit"]
             )
-            st.caption(
-                f"Threshold: **{threshold_col_display} {cutoff_label}** · "
-                f"{n_filtered:,} readings ({pct_of_total:.1f}% of selected range) · "
-                f"{aggregation_caption}"
+            threshold_focus_text = {
+                "Top (above threshold)": f"top {int(threshold_pct)}%",
+                "Bottom (below threshold)": f"bottom {int(threshold_pct)}%",
+                "Both extremes": f"top and bottom {int(threshold_pct)}%",
+            }[threshold_side]
+            threshold_title = (
+                f"{view_mode} – Trends when {threshold_col_display} is in the "
+                f"{threshold_focus_text}"
             )
             if threshold_view == "Normalized (0-1)":
-                st.caption("Each series is scaled independently to 0-1 for shape comparison.")
-            if thin_step > 1:
-                st.caption(
-                    f"To keep things fast, this chart shows {plotted_points:,} of {raw_points:,} points."
+                threshold_title += " (normalized)"
+
+            trace_name_suffix = (
+                "" if threshold_agg_choice == "1min" else f" ({threshold_agg_choice} avg)"
+            )
+            (
+                fig_thresh,
+                cutoff_label,
+                n_filtered,
+                raw_points,
+                plotted_points,
+                thin_step,
+            ) = build_threshold_explorer_chart(
+                df=threshold_base,
+                threshold_col=threshold_col,
+                pct=int(threshold_pct),
+                side=threshold_side,
+                title=threshold_title,
+                colour_map=colour_map,
+                flow_unit=flow_unit,
+                loc_flow_unit=loc_meta["flow_unit"],
+                freq=FREQ_MAP[threshold_agg_choice],
+                comparison_view=threshold_view,
+                trace_name_suffix=trace_name_suffix,
+            )
+            if fig_thresh is None:
+                st.info("No data points meet the threshold condition for this period.")
+            else:
+                pct_of_total = (
+                    n_filtered / max(int(threshold_base[threshold_col].count()), 1)
+                ) * 100
+                aggregation_caption = (
+                    "showing raw filtered timestamps"
+                    if threshold_agg_choice == "1min"
+                    else f"aggregated to {threshold_agg_choice.lower()} means"
                 )
-            st.plotly_chart(fig_thresh, width="stretch")
+                st.caption(threshold_focus_caption)
+                st.caption(
+                    f"Threshold: **{threshold_col_display} {cutoff_label}** · "
+                    f"{n_filtered:,} readings ({pct_of_total:.1f}% of current period) · "
+                    f"{aggregation_caption}"
+                )
+                if threshold_view == "Normalized (0-1)":
+                    st.caption("Each series is scaled independently to 0-1 for shape comparison.")
+                if thin_step > 1:
+                    st.caption(
+                        f"To keep things fast, this chart shows {plotted_points:,} of {raw_points:,} points."
+                    )
+                st.plotly_chart(fig_thresh, width="stretch")
 
     # --------------------------------------------------
     # Trend over time
