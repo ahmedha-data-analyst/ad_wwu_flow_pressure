@@ -176,16 +176,14 @@ LOCATIONS = {
     },
     "Enfield": {
         "file": "enfield_charlton_cleaned.parquet",
-        # UNVERIFIED COORDINATES: No public place named "Enfield" found in Gloucestershire.
-        # These coordinates fall in the Stroud district. Confirm exact site location
-        # with WWU source data / GIS records before using for precise mapping.
-        "lat": 51.62,
-        "lon": -2.20,
+        # Verified by WWU: EX5 1AF / OS grid 298460, 090745 → near Broadclyst, Devon.
+        "lat": 50.759,
+        "lon": -3.407,
         "compare_col": "Enfield flow (F1)",
         "compare_scale": 1 / 1000,  # Scmh → Kscmh
         "flow_unit": "Scmh",
         "has_pressure": True,
-        "description": "Flow & outlet pressure · Gloucestershire",
+        "description": "Flow & outlet pressure · Devon",
         "columns": ["Enfield outlet (IP1)", "Enfield flow (F1)"],
     },
     "Charlton": {
