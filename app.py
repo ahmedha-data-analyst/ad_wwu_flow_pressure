@@ -3146,6 +3146,15 @@ elif is_biomethane:
         bm_fc_plot, _ = thin_time_series(bm_fc_plot)
         if bm_fc_plot.empty:
             st.info("No flow data in the selected date range.")
+        elif bm_fc_view == "Small multiples (separate panels)":
+            for col in bm_fc_plot.columns:
+                single = bm_fc_plot[[col]]
+                fig_s = build_comparison_chart(
+                    single,
+                    col,
+                    "Time",
+                )
+                st.plotly_chart(fig_s, width="stretch")
         else:
             fig_bm_fc = render_comparison_chart(
                 bm_fc_plot,
@@ -3188,6 +3197,12 @@ elif is_biomethane:
         bm_pc_plot, _ = thin_time_series(bm_pc_plot)
         if bm_pc_plot.empty:
             st.info("No pressure data in the selected date range.")
+        elif bm_pc_view == "Small multiples (separate panels)":
+            for col in bm_pc_plot.columns:
+                single = bm_pc_plot[[col]]
+                fig_s = build_comparison_chart(single, col, "Time")
+                fig_s.update_layout(yaxis_title="Outlet Pressure (Bar)")
+                st.plotly_chart(fig_s, width="stretch")
         else:
             fig_bm_pc = render_comparison_chart(
                 bm_pc_plot,
@@ -3247,26 +3262,29 @@ elif is_biomethane:
         bm_cal_pres = pat_df[[c for c in _BM_PRES_COLS if c in pat_df.columns]]
 
         if not bm_cal_flow.empty:
-            fig_bm_cal_f = render_comparison_chart(
-                bm_cal_flow,
-                "Average Flow by Calendar Month",
-                "Month",
-                bm_cal_view,
-                mode="lines+markers",
-                marker_size=8,
-            )
-            st.plotly_chart(fig_bm_cal_f, width="stretch")
+            if bm_cal_view == "Small multiples (separate panels)":
+                for col in bm_cal_flow.columns:
+                    fig_s = build_comparison_chart(bm_cal_flow[[col]], col, "Month", mode="lines+markers", marker_size=8)
+                    st.plotly_chart(fig_s, width="stretch")
+            else:
+                fig_bm_cal_f = render_comparison_chart(
+                    bm_cal_flow, "Average Flow by Calendar Month", "Month",
+                    bm_cal_view, mode="lines+markers", marker_size=8,
+                )
+                st.plotly_chart(fig_bm_cal_f, width="stretch")
         if not bm_cal_pres.empty:
-            fig_bm_cal_p = render_comparison_chart(
-                bm_cal_pres,
-                "Average Outlet Pressure by Calendar Month",
-                "Month",
-                bm_cal_view,
-                mode="lines+markers",
-                marker_size=8,
-            )
-            fig_bm_cal_p.update_layout(yaxis_title="Outlet Pressure (Bar)")
-            st.plotly_chart(fig_bm_cal_p, width="stretch")
+            if bm_cal_view == "Small multiples (separate panels)":
+                for col in bm_cal_pres.columns:
+                    fig_s = build_comparison_chart(bm_cal_pres[[col]], col, "Month", mode="lines+markers", marker_size=8)
+                    fig_s.update_layout(yaxis_title="Outlet Pressure (Bar)")
+                    st.plotly_chart(fig_s, width="stretch")
+            else:
+                fig_bm_cal_p = render_comparison_chart(
+                    bm_cal_pres, "Average Outlet Pressure by Calendar Month", "Month",
+                    bm_cal_view, mode="lines+markers", marker_size=8,
+                )
+                fig_bm_cal_p.update_layout(yaxis_title="Outlet Pressure (Bar)")
+                st.plotly_chart(fig_bm_cal_p, width="stretch")
 
     # ------------------------------------------------------------------
     elif bm_section == "Average by hour of day":
@@ -3283,26 +3301,29 @@ elif is_biomethane:
         bm_hr_pres = hr_pat_df[[c for c in _BM_PRES_COLS if c in hr_pat_df.columns]]
 
         if not bm_hr_flow.empty:
-            fig_bm_hr_f = render_comparison_chart(
-                bm_hr_flow,
-                "Average Flow by Hour of Day",
-                "Hour of day (0-23)",
-                bm_hr_view,
-                mode="lines+markers",
-                marker_size=7,
-            )
-            st.plotly_chart(fig_bm_hr_f, width="stretch")
+            if bm_hr_view == "Small multiples (separate panels)":
+                for col in bm_hr_flow.columns:
+                    fig_s = build_comparison_chart(bm_hr_flow[[col]], col, "Hour of day (0-23)", mode="lines+markers", marker_size=7)
+                    st.plotly_chart(fig_s, width="stretch")
+            else:
+                fig_bm_hr_f = render_comparison_chart(
+                    bm_hr_flow, "Average Flow by Hour of Day", "Hour of day (0-23)",
+                    bm_hr_view, mode="lines+markers", marker_size=7,
+                )
+                st.plotly_chart(fig_bm_hr_f, width="stretch")
         if not bm_hr_pres.empty:
-            fig_bm_hr_p = render_comparison_chart(
-                bm_hr_pres,
-                "Average Outlet Pressure by Hour of Day",
-                "Hour of day (0-23)",
-                bm_hr_view,
-                mode="lines+markers",
-                marker_size=7,
-            )
-            fig_bm_hr_p.update_layout(yaxis_title="Outlet Pressure (Bar)")
-            st.plotly_chart(fig_bm_hr_p, width="stretch")
+            if bm_hr_view == "Small multiples (separate panels)":
+                for col in bm_hr_pres.columns:
+                    fig_s = build_comparison_chart(bm_hr_pres[[col]], col, "Hour of day (0-23)", mode="lines+markers", marker_size=7)
+                    fig_s.update_layout(yaxis_title="Outlet Pressure (Bar)")
+                    st.plotly_chart(fig_s, width="stretch")
+            else:
+                fig_bm_hr_p = render_comparison_chart(
+                    bm_hr_pres, "Average Outlet Pressure by Hour of Day", "Hour of day (0-23)",
+                    bm_hr_view, mode="lines+markers", marker_size=7,
+                )
+                fig_bm_hr_p.update_layout(yaxis_title="Outlet Pressure (Bar)")
+                st.plotly_chart(fig_bm_hr_p, width="stretch")
 
     # ------------------------------------------------------------------
     elif bm_section == "Flow vs pressure scatter":
