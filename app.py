@@ -3120,12 +3120,13 @@ elif is_biomethane:
             "Injection flow from all three sites on one chart. "
             "All values in Kscmh (thousands of standard cubic metres per hour)."
         )
+        _BM_FREQ_OPTS = ["Hourly", "Daily", "Weekly", "Monthly"]
         bm_fc_ctrl1, bm_fc_ctrl2 = st.columns(2)
         with bm_fc_ctrl1:
             bm_fc_agg = st.selectbox(
                 "Data granularity",
-                options=list(FREQ_MAP.keys()),
-                index=list(FREQ_MAP.keys()).index("Daily"),
+                options=_BM_FREQ_OPTS,
+                index=_BM_FREQ_OPTS.index("Daily"),
                 key="bm_fc_agg",
             )
         with bm_fc_ctrl2:
@@ -3161,12 +3162,13 @@ elif is_biomethane:
             "Outlet pressure from all three sites on one chart. "
             "All values in Bar."
         )
+        _BM_FREQ_OPTS = ["Hourly", "Daily", "Weekly", "Monthly"]
         bm_pc_ctrl1, bm_pc_ctrl2 = st.columns(2)
         with bm_pc_ctrl1:
             bm_pc_agg = st.selectbox(
                 "Data granularity",
-                options=list(FREQ_MAP.keys()),
-                index=list(FREQ_MAP.keys()).index("Daily"),
+                options=_BM_FREQ_OPTS,
+                index=_BM_FREQ_OPTS.index("Daily"),
                 key="bm_pc_agg",
             )
         with bm_pc_ctrl2:
