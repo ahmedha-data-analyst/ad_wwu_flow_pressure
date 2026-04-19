@@ -246,6 +246,13 @@ COMPARE_SERIES_COLOURS = {
     "Aylesbeare": LOCATION_COLOURS["Aylesbeare"],
     "Enfield flow (F1)": "#5b21b6",
     "Charlton flow (F1)": "#0d9488",
+    # Biomethane comparison display-name keys
+    "Enfield \u2014 Flow (Kscmh)":    "#7c3aed",
+    "Charlton \u2014 Flow (Kscmh)":   "#0d9488",
+    "Great Hele \u2014 Flow (Kscmh)": "#9bc53d",
+    "Enfield \u2014 Pressure (Bar)":    "#a78bfa",
+    "Charlton \u2014 Pressure (Bar)":   "#2dd4bf",
+    "Great Hele \u2014 Pressure (Bar)": "#c5e67a",
 }
 
 
@@ -579,22 +586,32 @@ def get_compare_date_bounds():
 # ======================================================
 # SIDEBAR – VIEW MODE
 # ======================================================
-view_options = ["All Locations"] + list(LOCATIONS.keys())
+view_options = ["All Locations", "Biomethane Sites"] + list(LOCATIONS.keys())
 view_mode = st.sidebar.radio(
     "View",
     options=view_options,
     index=0,
-    help="Compare all locations or dive into one",
+    help="Compare all locations, explore biomethane injection sites, or dive into one",
 )
 is_compare = view_mode == "All Locations"
+is_biomethane = view_mode == "Biomethane Sites"
 
 st.sidebar.markdown("---")
 
 # ======================================================
 # SIDEBAR – DATE RANGE (context-dependent)
 # ======================================================
+BIOMETHANE_SITES = ["Enfield", "Charlton", "Great Hele"]
+
 if is_compare:
     global_min, global_max = get_compare_date_bounds()
+elif is_biomethane:
+    _bm_mins, _bm_maxs = [], []
+    for _s in BIOMETHANE_SITES:
+        _df_tmp = load_location(_s)
+        _bm_mins.append(_df_tmp.index.min().date())
+        _bm_maxs.append(_df_tmp.index.max().date())
+    global_min, global_max = min(_bm_mins), max(_bm_maxs)
 else:
     loc_df_raw = load_location(view_mode)
     global_min = loc_df_raw.index.min().date()
@@ -735,6 +752,83 @@ def build_compare_pattern_df(pattern, start, end, filter_outliers: bool = True):
     return pd.DataFrame(frames).astype("float32")
 
 
+@st.cache_data(max_entries=16)
+def build_bm_comparison_df(freq, start, end, filter_outliers: bool = True):
+    """Six-column DataFrame for biomethane cross-site comparison.
+
+    Columns (all display-name keyed so chart builders pick up colours automatically):
+      Enfield — Flow (Kscmh), Charlton — Flow (Kscmh), Great Hele — Flow (Kscmh)
+      Enfield — Pressure (Bar), Charlton — Pressure (Bar), Great Hele — Pressure (Bar)
+    """
+    ec_raw = pd.read_parquet(
+        "enfield_charlton_cleaned.parquet",
+        columns=["Enfield flow (F1)", "Enfield outlet (IP1)",
+                 "Charlton flow (F1)", "Charlton outlet (MP1)"],
+    )
+    gh_raw = pd.read_parquet(
+        "great_hele_combined.parquet",
+        columns=["Flow (Scmh)", "Pressure (Bar)"],
+    )
+    # Ensure DatetimeIndex with timezone, mirroring load_location logic
+    for _df in [ec_raw, gh_raw]:
+        if not isinstance(_df.index, pd.DatetimeIndex):
+            for _c in ["Time", "Datetime", "timestamp"]:
+                if _c in _df.columns:
+                    _df[_c] = pd.to_datetime(_df[_c], utc=True)
+                    _df = _df.set_index(_c)
+                    break
+            else:
+                _df.index = pd.to_datetime(_df.index, utc=True)
+        elif _df.index.tz is None:
+            _df.index = _df.index.tz_localize("UTC")
+        _df.sort_index(inplace=True)
+
+    ec_raw = filter_by_date(ec_raw, start, end)
+    gh_raw = filter_by_date(gh_raw, start, end)
+
+    if filter_outliers:
+        for _df2 in [ec_raw, gh_raw]:
+            for _col in _df2.select_dtypes("number").columns:
+                _q1 = float(_df2[_col].quantile(0.25))
+                _q3 = float(_df2[_col].quantile(0.75))
+                _iqr = _q3 - _q1
+                _df2.loc[(_df2[_col] < _q1 - 3 * _iqr) | (_df2[_col] > _q3 + 3 * _iqr), _col] = float("nan")
+
+    frames = {}
+    for raw_col, new_col, scale in [
+        ("Enfield flow (F1)",     "Enfield \u2014 Flow (Kscmh)",    1 / 1000),
+        ("Charlton flow (F1)",    "Charlton \u2014 Flow (Kscmh)",   1 / 1000),
+        ("Enfield outlet (IP1)",  "Enfield \u2014 Pressure (Bar)",  1.0),
+        ("Charlton outlet (MP1)", "Charlton \u2014 Pressure (Bar)", 1.0),
+    ]:
+        if raw_col in ec_raw.columns:
+            s = ec_raw[raw_col] * scale
+            frames[new_col] = (s.resample(freq).mean() if freq != "1min" else s).astype("float32")
+    for raw_col, new_col, scale in [
+        ("Flow (Scmh)",    "Great Hele \u2014 Flow (Kscmh)",    1 / 1000),
+        ("Pressure (Bar)", "Great Hele \u2014 Pressure (Bar)", 1.0),
+    ]:
+        if raw_col in gh_raw.columns:
+            s = gh_raw[raw_col] * scale
+            frames[new_col] = (s.resample(freq).mean() if freq != "1min" else s).astype("float32")
+
+    return pd.DataFrame(frames).dropna(how="all")
+
+
+@st.cache_data(max_entries=8)
+def build_bm_comparison_pattern_df(pattern, start, end, filter_outliers: bool = True):
+    """Group the biomethane comparison DataFrame by month (1-12) or hour (0-23)."""
+    full_df = build_bm_comparison_df("1min", start, end, filter_outliers)
+    result = {}
+    for col in full_df.columns:
+        s = full_df[col].dropna()
+        if pattern == "month":
+            result[col] = s.groupby(s.index.month).mean().astype("float32")
+        else:
+            result[col] = s.groupby(s.index.hour).mean().astype("float32")
+    return pd.DataFrame(result)
+
+
 def thin_time_series(dataframe, max_points=50000):
     """Downsample very dense trend charts to keep Plotly responsive."""
     if len(dataframe) <= max_points:
@@ -779,6 +873,8 @@ def select_time_focus(dataframe, key_prefix):
 
 if is_compare:
     compare_total_recs, compare_summary = build_compare_summary_data(start_date, end_date, remove_outliers)
+elif is_biomethane:
+    pass  # biomethane page loads its own data per site below
 else:
     loc_df_full = filter_by_date(loc_df_raw, start_date, end_date)
     if loc_df_full.empty:
@@ -814,6 +910,13 @@ if is_compare:
         f"<p style='color:{SUBTEXT_COL}; font-size:0.9rem;'>"
         f"Total records across all locations: "
         f"<span style='color:{TEXT_COL}; font-weight:600;'>{compare_total_recs:,}</span></p>",
+        unsafe_allow_html=True,
+    )
+elif is_biomethane:
+    st.sidebar.markdown(
+        f"<p style='color:{SUBTEXT_COL}; font-size:0.9rem;'>"
+        f"Biomethane injection sites: "
+        f"<span style='color:{TEXT_COL}; font-weight:600;'>Enfield · Charlton · Great Hele</span></p>",
         unsafe_allow_html=True,
     )
 else:
@@ -852,6 +955,9 @@ if wwu_logo_b64:
 if is_compare:
     hero_title = "Gas Network Flow Explorer"
     hero_subtitle = "HydroStar × Wales &amp; West Utilities · All Locations"
+elif is_biomethane:
+    hero_title = "Biomethane Injection Sites"
+    hero_subtitle = "HydroStar × Wales &amp; West Utilities · Enfield · Charlton · Great Hele"
 else:
     hero_title = f"{view_mode} Flow Explorer"
     hero_subtitle = f"HydroStar × Wales &amp; West Utilities · {LOCATIONS[view_mode]['description']}"
@@ -1652,6 +1758,204 @@ def build_comparison_chart(plot_df, title, xaxis_title, mode="lines", marker_siz
     return apply_dark_layout(fig, title)
 
 
+def build_comparison_chart_normalised(plot_df, title, xaxis_title, mode="lines", marker_size=7):
+    """Same as build_comparison_chart but each series is scaled to [0, 1] so
+    locations with very different absolute flows can be compared visually."""
+    span = (plot_df.max() - plot_df.min()).replace(0, pd.NA)
+    norm_df = ((plot_df - plot_df.min()) / span).fillna(0.0)
+    fig = go.Figure()
+    for col in norm_df.columns:
+        colour = COMPARE_SERIES_COLOURS.get(col, LOCATION_COLOURS.get(col, "#6366f1"))
+        raw_min = float(plot_df[col].min()) if col in plot_df.columns else 0
+        raw_max = float(plot_df[col].max()) if col in plot_df.columns else 0
+        trace_kwargs = dict(
+            x=norm_df.index,
+            y=norm_df[col],
+            mode=mode,
+            name=col,
+            line=dict(color=colour, width=2.4),
+            customdata=plot_df[[col]].values,
+            hovertemplate=(
+                f"<b>{col}</b><br>%{{x}}<br>"
+                f"Normalised: %{{y:.3f}}<br>"
+                f"Actual: %{{customdata[0]:,.4f}} Kscmh<extra></extra>"
+            ),
+        )
+        if "markers" in trace_kwargs.get("mode", ""):
+            trace_kwargs["marker"] = dict(size=marker_size)
+        fig.add_trace(go.Scatter(**trace_kwargs))
+
+    fig.update_layout(
+        xaxis_title=xaxis_title,
+        yaxis_title="Normalised flow (0 = min, 1 = max per series)",
+    )
+    fig = apply_dark_layout(fig, title)
+    fig.add_annotation(
+        text="Each series scaled to its own min/max — hover to see actual Kscmh values",
+        xref="paper", yref="paper", x=0, y=-0.13,
+        showarrow=False, font=dict(size=11, color=SUBTEXT_COL), xanchor="left",
+    )
+    return fig
+
+
+def build_comparison_chart_small_multiples(plot_df, title, xaxis_title, mode="lines", marker_size=7):
+    """One subplot per series, each with its own independent y-axis."""
+    cols = [c for c in plot_df.columns if plot_df[c].notna().any()]
+    n = len(cols)
+    if n == 0:
+        return go.Figure()
+
+    ncols = 2
+    nrows = math.ceil(n / ncols)
+    subplot_titles = cols
+
+    fig = make_subplots(
+        rows=nrows,
+        cols=ncols,
+        shared_xaxes=True,
+        subplot_titles=subplot_titles,
+        vertical_spacing=0.10,
+        horizontal_spacing=0.08,
+    )
+
+    for idx, col in enumerate(cols):
+        row = idx // ncols + 1
+        col_pos = idx % ncols + 1
+        colour = COMPARE_SERIES_COLOURS.get(col, LOCATION_COLOURS.get(col, "#6366f1"))
+        trace_kwargs = dict(
+            x=plot_df.index,
+            y=plot_df[col],
+            mode=mode,
+            name=col,
+            line=dict(color=colour, width=2.2),
+            showlegend=False,
+        )
+        if "markers" in mode:
+            trace_kwargs["marker"] = dict(size=marker_size)
+        fig.add_trace(go.Scatter(**trace_kwargs), row=row, col=col_pos)
+        fig.update_yaxes(title_text="Kscmh", row=row, col=col_pos,
+                         gridcolor="rgba(255,255,255,0.08)",
+                         linecolor="rgba(255,255,255,0.18)")
+
+    height = 260 * nrows + 80
+    fig.update_layout(
+        height=height,
+        template="plotly_dark",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=TEXT_COL, family="Hind, sans-serif"),
+        title=dict(text=title, font=dict(size=20, color=TEXT_COL, family="Hind, sans-serif")),
+        margin=dict(l=66, r=72, t=90, b=62),
+        hovermode="x unified",
+    )
+    fig.update_xaxes(
+        title_text=xaxis_title,
+        gridcolor="rgba(255,255,255,0.08)",
+        linecolor="rgba(255,255,255,0.18)",
+        automargin=True,
+    )
+    for annotation in fig.layout.annotations:
+        annotation.font = dict(color=TEXT_COL, size=13, family="Hind, sans-serif")
+    return fig
+
+
+CHART_VIEW_OPTIONS = [
+    "All series — shared axis",
+    "Normalised (0–1 per series)",
+    "Small multiples (separate panels)",
+]
+
+
+def render_comparison_chart(plot_df, title, xaxis_title, chart_view, mode="lines", marker_size=7):
+    """Dispatch to the right chart builder based on the chart_view dropdown value."""
+    if chart_view == "Normalised (0–1 per series)":
+        return build_comparison_chart_normalised(plot_df, title, xaxis_title, mode, marker_size)
+    if chart_view == "Small multiples (separate panels)":
+        return build_comparison_chart_small_multiples(plot_df, title, xaxis_title, mode, marker_size)
+    return build_comparison_chart(plot_df, title, xaxis_title, mode, marker_size)
+
+
+def build_dual_axis_chart(
+    df,
+    flow_cols,
+    pressure_cols,
+    title,
+    colour_map,
+    flow_label="Flow (Kscmh)",
+    pressure_label="Pressure (Bar)",
+    flow_unit="Kscmh",
+    loc_flow_unit=None,
+    xaxis_title="Time",
+):
+    """Dual y-axis chart: flow series on the left axis, pressure on the right.
+
+    Uses secondary_y subplots so both axes are independent and clearly labelled,
+    matching the style seen in the reference matplotlib charts.
+    """
+    from plotly.subplots import make_subplots
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    default_colour = next(iter(colour_map.values()), "#6366f1")
+
+    for col in flow_cols:
+        if col not in df.columns:
+            continue
+        colour = colour_map.get(col, default_colour)
+        y_vals = get_display_series_values(df[col], col, flow_unit, loc_flow_unit)
+        display_name = get_display_series_name(col, flow_unit, loc_flow_unit)
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=y_vals,
+                mode="lines",
+                name=display_name,
+                line=dict(color=colour, width=2.2),
+                hovertemplate=f"<b>{display_name}</b><br>%{{x|%Y-%m-%d %H:%M}}<br>%{{y:,.4f}}<extra></extra>",
+            ),
+            secondary_y=False,
+        )
+
+    for col in pressure_cols:
+        if col not in df.columns:
+            continue
+        colour = colour_map.get(col, default_colour)
+        display_name = get_display_series_name(col, flow_unit, loc_flow_unit)
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df[col],
+                mode="lines",
+                name=display_name,
+                line=dict(color=colour, width=2.2, dash="dot"),
+                hovertemplate=f"<b>{display_name}</b><br>%{{x|%Y-%m-%d %H:%M}}<br>%{{y:,.4f}} Bar<extra></extra>",
+            ),
+            secondary_y=True,
+        )
+
+    fig.update_yaxes(
+        title_text=flow_label,
+        secondary_y=False,
+        gridcolor="rgba(255,255,255,0.08)",
+        linecolor="rgba(255,255,255,0.18)",
+    )
+    fig.update_yaxes(
+        title_text=pressure_label,
+        secondary_y=True,
+        gridcolor="rgba(255,255,255,0.04)",
+        linecolor="rgba(255,255,255,0.12)",
+        showgrid=False,
+    )
+    fig.update_xaxes(
+        title_text=xaxis_title,
+        gridcolor="rgba(255,255,255,0.08)",
+        linecolor="rgba(255,255,255,0.18)",
+        automargin=True,
+    )
+    fig = apply_dark_layout(fig, title)
+    return fig
+
+
 def get_colour_fallback(colour_map, default="#6366f1"):
     return next(iter(colour_map.values()), default)
 
@@ -1752,7 +2056,7 @@ map_lons = [p["display_lon"] for p in map_points]
 map_names = [p["name"] for p in map_points]
 map_descs = [p["description"] for p in map_points]
 map_colours = [LOCATION_COLOURS[n] for n in map_names]
-map_active = [is_compare or n == view_mode for n in map_names]
+map_active = [is_compare or (is_biomethane and n in BIOMETHANE_SITES) or n == view_mode for n in map_names]
 map_sizes = [28 if active else 16 for active in map_active]
 map_halo_sizes = [s + 14 for s in map_sizes]
 map_ring_sizes = [s + 4 for s in map_sizes]
@@ -1842,7 +2146,7 @@ FREQ_MAP = {
     "Hourly": "h",
     "Daily": "D",
     "Weekly": "W",
-    "Monthly": "ME",
+    "Monthly": "MS",
 }
 
 
@@ -1916,19 +2220,31 @@ if is_compare:
     elif compare_section == "Trend over time":
         st.markdown("## Trend over time")
 
-        ctrl1, ctrl2, ctrl3 = st.columns(3)
-        with ctrl3:
+        ctrl1, ctrl2, ctrl3, ctrl4 = st.columns(4)
+        with ctrl4:
             trend_location = st.selectbox(
                 "Series to show",
                 options=["All series"] + list(COMPARE_SERIES.keys()),
                 index=0,
                 key="compare_trend_location",
             )
-        with ctrl2:
+        with ctrl3:
             agg_choice = st.selectbox(
                 "Data granularity",
                 options=list(FREQ_MAP.keys()),
                 index=list(FREQ_MAP.keys()).index("Daily"),
+            )
+        with ctrl2:
+            trend_chart_view = st.selectbox(
+                "Chart view",
+                options=CHART_VIEW_OPTIONS,
+                index=0,
+                key="trend_chart_view",
+                help=(
+                    "All series — shared axis: compare absolute flow values.\n"
+                    "Normalised: scale each series to 0–1 so seasonal patterns are equally visible.\n"
+                    "Small multiples: one panel per series, each with its own y-axis."
+                ),
             )
 
         compare_trend_df = build_compare_resampled_df(
@@ -1955,11 +2271,7 @@ if is_compare:
         if trend_location != "All series":
             trend_title = f"{trend_location} – {agg_choice.lower()} averages"
 
-        fig_trend = build_comparison_chart(
-            plot_data,
-            trend_title,
-            "Time",
-        )
+        fig_trend = render_comparison_chart(plot_data, trend_title, "Time", trend_chart_view)
         st.caption(focus_caption)
         if thin_step > 1:
             st.caption(
@@ -1969,30 +2281,64 @@ if is_compare:
 
     elif compare_section == "Daily averages":
         st.markdown("## Daily averages")
+        daily_chart_view = st.selectbox(
+            "Chart view",
+            options=CHART_VIEW_OPTIONS,
+            index=0,
+            key="daily_chart_view",
+            help=(
+                "All series — shared axis: compare absolute flow values.\n"
+                "Normalised: scale each series to 0–1 so seasonal patterns are equally visible.\n"
+                "Small multiples: one panel per series, each with its own y-axis."
+            ),
+        )
         compare_daily = build_compare_resampled_df("D", start_date, end_date, remove_outliers)
-        fig_daily = build_comparison_chart(compare_daily, "Daily Average Flow", "Year")
+        fig_daily = render_comparison_chart(compare_daily, "Daily Average Flow", "Date", daily_chart_view)
         st.plotly_chart(fig_daily, width="stretch")
 
     elif compare_section == "Monthly averages":
         st.markdown("## Monthly averages (multi-year seasonality)")
-        compare_monthly = build_compare_resampled_df("ME", start_date, end_date, remove_outliers)
-        fig_monthly = build_comparison_chart(
-            compare_monthly, "Monthly Average Flow", "Year"
+        monthly_chart_view = st.selectbox(
+            "Chart view",
+            options=CHART_VIEW_OPTIONS,
+            index=0,
+            key="monthly_chart_view",
+            help=(
+                "All series — shared axis: compare absolute flow values.\n"
+                "Normalised: scale each series to 0–1 so seasonal patterns are equally visible.\n"
+                "Small multiples: one panel per series, each with its own y-axis."
+            ),
+        )
+        compare_monthly = build_compare_resampled_df("MS", start_date, end_date, remove_outliers)
+        fig_monthly = render_comparison_chart(
+            compare_monthly, "Monthly Average Flow", "Date", monthly_chart_view
         )
         st.plotly_chart(fig_monthly, width="stretch")
 
     elif compare_section == "Average by calendar month":
         st.markdown("## Average by calendar month")
+        cal_month_chart_view = st.selectbox(
+            "Chart view",
+            options=CHART_VIEW_OPTIONS,
+            index=0,
+            key="cal_month_chart_view",
+            help=(
+                "All series — shared axis: compare absolute flow values.\n"
+                "Normalised: scale each series to 0–1 so seasonal patterns are equally visible.\n"
+                "Small multiples: one panel per series, each with its own y-axis."
+            ),
+        )
         month_labels = [
             "Jan", "Feb", "Mar", "Apr", "May", "Jun",
             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ]
         monthly_pat = build_compare_pattern_df("month", start_date, end_date, remove_outliers)
         monthly_pat.index = month_labels[: len(monthly_pat)]
-        fig_mpat = build_comparison_chart(
+        fig_mpat = render_comparison_chart(
             monthly_pat,
             "Average Flow by Calendar Month",
             "Month",
+            cal_month_chart_view,
             mode="lines+markers",
             marker_size=8,
         )
@@ -2000,11 +2346,23 @@ if is_compare:
 
     elif compare_section == "Average by hour of day":
         st.markdown("## Average by hour of day")
+        hourly_chart_view = st.selectbox(
+            "Chart view",
+            options=CHART_VIEW_OPTIONS,
+            index=0,
+            key="hourly_chart_view",
+            help=(
+                "All series — shared axis: compare absolute flow values.\n"
+                "Normalised: scale each series to 0–1 so seasonal patterns are equally visible.\n"
+                "Small multiples: one panel per series, each with its own y-axis."
+            ),
+        )
         compare_hourly_pat = build_compare_pattern_df("hour", start_date, end_date, remove_outliers)
-        fig_hpat = build_comparison_chart(
+        fig_hpat = render_comparison_chart(
             compare_hourly_pat,
             "Average Flow by Hour of Day",
             "Hour",
+            hourly_chart_view,
             mode="lines+markers",
             marker_size=7,
         )
@@ -2050,7 +2408,7 @@ if is_compare:
 # ##########################################################################
 #                     INDIVIDUAL LOCATION VIEW
 # ##########################################################################
-else:
+elif not is_biomethane:
     loc_meta = LOCATIONS[view_mode]
     colour_map = SERIES_COLOUR_MAPS.get(view_mode, {})
     default_colour = get_colour_fallback(
@@ -2443,7 +2801,7 @@ else:
     # --------------------------------------------------
     st.markdown("## Monthly averages (multi-year seasonality)")
 
-    monthly = loc_df.resample("ME").mean().dropna(how="all")
+    monthly = loc_df.resample("MS").mean().dropna(how="all")
     fig_monthly = build_stacked_line_chart(
         monthly,
         f"{view_mode} – Monthly Averages",
@@ -2542,3 +2900,654 @@ else:
     # --------------------------------------------------
     with st.expander("Show raw data (first and last 100 rows)"):
         show_head_tail_dataframe(loc_df)
+
+
+# ##########################################################################
+#                     BIOMETHANE INJECTION SITES PAGE
+# ##########################################################################
+elif is_biomethane:
+
+    # ------------------------------------------------------------------
+    # Site metadata: which columns are flow, which are pressure, colours
+    # ------------------------------------------------------------------
+    BM_SITES = {
+        "Enfield": {
+            "flow_cols": ["Enfield flow (F1)"],
+            "pressure_cols": ["Enfield outlet (IP1)"],
+            "flow_unit": "Scmh",      # native unit in parquet
+            "flow_label": "Flow (Kscmh)",
+            "pressure_label": "Outlet pressure (Bar)",
+            "flow_scale": 1 / 1000,   # Scmh → Kscmh for display
+        },
+        "Charlton": {
+            "flow_cols": ["Charlton flow (F1)"],
+            "pressure_cols": ["Charlton outlet (MP1)"],
+            "flow_unit": "Scmh",
+            "flow_label": "Flow (Kscmh)",
+            "pressure_label": "Outlet pressure (Bar)",
+            "flow_scale": 1 / 1000,
+        },
+        "Great Hele": {
+            "flow_cols": ["Flow (Scmh)"],
+            "pressure_cols": ["Pressure (Bar)"],
+            "flow_unit": "Scmh",
+            "flow_label": "Flow (Kscmh)",
+            "pressure_label": "Pressure (Bar)",
+            "flow_scale": 1 / 1000,
+        },
+    }
+
+    # Colour maps per site (reuse existing SERIES_COLOUR_MAPS where available)
+    BM_COLOUR_MAPS = {
+        site: SERIES_COLOUR_MAPS.get(site, {}) for site in BM_SITES
+    }
+
+    # ------------------------------------------------------------------
+    # Load & filter all three site DataFrames
+    # ------------------------------------------------------------------
+    bm_dfs_raw = {}
+    for site in BM_SITES:
+        _raw = load_location(site)
+        _filtered = filter_by_date(_raw, start_date, end_date)
+        if remove_outliers:
+            _bounds = compute_iqr_bounds(site)
+            _filtered = apply_outlier_filter(_filtered, _bounds)
+        bm_dfs_raw[site] = _filtered
+
+    # ------------------------------------------------------------------
+    # Helper: apply flow scale to produce display-ready Kscmh values
+    # ------------------------------------------------------------------
+    def _bm_display_df(site, df):
+        """Return a copy of df with flow columns converted to Kscmh."""
+        meta = BM_SITES[site]
+        df = df.copy()
+        for col in meta["flow_cols"]:
+            if col in df.columns:
+                df[col] = df[col] * meta["flow_scale"]
+        return df
+
+    # ------------------------------------------------------------------
+    # Helper: dual-axis resample + chart for one site
+    # ------------------------------------------------------------------
+    def _bm_dual_chart(site, df, title, freq="D", xaxis_title="Date"):
+        meta = BM_SITES[site]
+        cmap = BM_COLOUR_MAPS[site]
+        all_cols = meta["flow_cols"] + meta["pressure_cols"]
+        available = [c for c in all_cols if c in df.columns]
+        if not available or df.empty:
+            return None
+        sub = df[available]
+        if freq != "1min":
+            sub = sub.resample(freq).mean().dropna(how="all")
+        sub, _ = thin_time_series(sub)
+        sub = _bm_display_df(site, sub)
+        return build_dual_axis_chart(
+            sub,
+            flow_cols=[c for c in meta["flow_cols"] if c in sub.columns],
+            pressure_cols=[c for c in meta["pressure_cols"] if c in sub.columns],
+            title=title,
+            colour_map=cmap,
+            flow_label=meta["flow_label"],
+            pressure_label=meta["pressure_label"],
+            xaxis_title=xaxis_title,
+        )
+
+    # ------------------------------------------------------------------
+    # Helper: dual-axis pattern chart (group by month or hour)
+    # ------------------------------------------------------------------
+    def _bm_pattern_chart(site, df, groupby, title, xaxis_title):
+        meta = BM_SITES[site]
+        cmap = BM_COLOUR_MAPS[site]
+        all_cols = meta["flow_cols"] + meta["pressure_cols"]
+        available = [c for c in all_cols if c in df.columns]
+        if not available or df.empty:
+            return None
+        sub = df[available].dropna(how="all")
+        if groupby == "month":
+            pat = sub.groupby(sub.index.month).mean()
+        else:
+            pat = sub.groupby(sub.index.hour).mean()
+        pat = _bm_display_df(site, pat)
+        return build_dual_axis_chart(
+            pat,
+            flow_cols=[c for c in meta["flow_cols"] if c in pat.columns],
+            pressure_cols=[c for c in meta["pressure_cols"] if c in pat.columns],
+            title=title,
+            colour_map=cmap,
+            flow_label=meta["flow_label"],
+            pressure_label=meta["pressure_label"],
+            xaxis_title=xaxis_title,
+        )
+
+    # ------------------------------------------------------------------
+    # Summary statistics KPIs
+    # ------------------------------------------------------------------
+    st.markdown("## Summary statistics")
+    st.caption("All flow values displayed in Kscmh · Pressure in Bar")
+
+    for site in BM_SITES:
+        meta = BM_SITES[site]
+        df_site = bm_dfs_raw[site]
+        colour = LOCATION_COLOURS.get(site, "#6366f1")
+        st.markdown(
+            f"<h4 style='color:{colour}; margin-bottom:0.2rem;'>{site}</h4>",
+            unsafe_allow_html=True,
+        )
+        kpi_cols_site = meta["flow_cols"] + meta["pressure_cols"]
+        kpi_cols_site = [c for c in kpi_cols_site if c in df_site.columns]
+        if not kpi_cols_site or df_site.empty:
+            st.info(f"No data for {site} in the selected date range.")
+            continue
+
+        mc = st.columns(len(kpi_cols_site) + 2)
+        first_valid = df_site[kpi_cols_site[0]].first_valid_index()
+        last_valid = df_site[kpi_cols_site[0]].last_valid_index()
+        with mc[0]:
+            st.metric("Start", first_valid.strftime("%Y-%m-%d") if first_valid else "–")
+        with mc[1]:
+            st.metric("End", last_valid.strftime("%Y-%m-%d") if last_valid else "–")
+        for idx, col in enumerate(kpi_cols_site):
+            with mc[idx + 2]:
+                val = df_site[col].dropna()
+                if col in meta["flow_cols"]:
+                    display_val = val * meta["flow_scale"]
+                    label = SERIES_DISPLAY_NAMES.get(col, col) + " mean (Kscmh)"
+                else:
+                    display_val = val
+                    label = SERIES_DISPLAY_NAMES.get(col, col) + " mean (Bar)"
+                st.metric(label, f"{float(display_val.mean()):,.4f}" if not display_val.empty else "–")
+
+        # Descriptive stats table
+        disp_df = df_site[kpi_cols_site].copy()
+        for col in meta["flow_cols"]:
+            if col in disp_df.columns:
+                disp_df[col] = disp_df[col] * meta["flow_scale"]
+        rename_map = {c: SERIES_DISPLAY_NAMES.get(c, c) for c in disp_df.columns}
+        disp_df = disp_df.rename(columns=rename_map)
+        desc = disp_df.describe().T
+        if "50%" in desc.columns:
+            desc.insert(2, "median", desc.pop("50%"))
+        show_stretch_dataframe(
+            desc.style.format(
+                {"count": "{:,.0f}"}
+                | {col: "{:,.4f}" for col in desc.columns if col != "count"}
+            ),
+            height=min(300, 80 + 28 * len(desc)),
+        )
+        st.markdown("")
+
+    # ------------------------------------------------------------------
+    # Section selector
+    # ------------------------------------------------------------------
+    st.markdown("## Analysis")
+    bm_section = st.selectbox(
+        "Section",
+        options=[
+            "Choose a section",
+            "Flow comparison",
+            "Pressure comparison",
+            "Flow and pressure per site",
+            "Average by calendar month",
+            "Average by hour of day",
+            "Flow vs pressure scatter",
+            "Seasonal trend by year",
+            "Distribution by year",
+            "Correlation between sites",
+            "Raw data",
+        ],
+        key="bm_section",
+    )
+
+    # Shorthand column name lists used across sections
+    _BM_FLOW_COLS = [
+        "Enfield \u2014 Flow (Kscmh)",
+        "Charlton \u2014 Flow (Kscmh)",
+        "Great Hele \u2014 Flow (Kscmh)",
+    ]
+    _BM_PRES_COLS = [
+        "Enfield \u2014 Pressure (Bar)",
+        "Charlton \u2014 Pressure (Bar)",
+        "Great Hele \u2014 Pressure (Bar)",
+    ]
+
+    if bm_section == "Choose a section":
+        st.info("Pick a section above to load its charts.")
+
+    # ------------------------------------------------------------------
+    elif bm_section == "Flow comparison":
+        st.markdown("## Flow comparison")
+        st.caption(
+            "Injection flow from all three sites on one chart. "
+            "All values in Kscmh (thousands of standard cubic metres per hour)."
+        )
+        bm_fc_ctrl1, bm_fc_ctrl2 = st.columns(2)
+        with bm_fc_ctrl1:
+            bm_fc_agg = st.selectbox(
+                "Data granularity",
+                options=list(FREQ_MAP.keys()),
+                index=list(FREQ_MAP.keys()).index("Daily"),
+                key="bm_fc_agg",
+            )
+        with bm_fc_ctrl2:
+            bm_fc_view = st.selectbox(
+                "Chart view",
+                options=CHART_VIEW_OPTIONS,
+                index=0,
+                key="bm_fc_view",
+                help=(
+                    "All series on one axis: compare absolute Kscmh values.\n"
+                    "Normalised: scale each site to 0-1 to compare seasonal patterns.\n"
+                    "Small multiples: one panel per site with its own axis."
+                ),
+            )
+        bm_fc_df = build_bm_comparison_df(FREQ_MAP[bm_fc_agg], start_date, end_date, remove_outliers)
+        bm_fc_plot = bm_fc_df[[c for c in _BM_FLOW_COLS if c in bm_fc_df.columns]]
+        bm_fc_plot, _ = thin_time_series(bm_fc_plot)
+        if bm_fc_plot.empty:
+            st.info("No flow data in the selected date range.")
+        else:
+            fig_bm_fc = render_comparison_chart(
+                bm_fc_plot,
+                f"Biomethane Flow Comparison — {bm_fc_agg.lower()} averages",
+                "Time",
+                bm_fc_view,
+            )
+            st.plotly_chart(fig_bm_fc, width="stretch")
+
+    # ------------------------------------------------------------------
+    elif bm_section == "Pressure comparison":
+        st.markdown("## Pressure comparison")
+        st.caption(
+            "Outlet pressure from all three sites on one chart. "
+            "All values in Bar."
+        )
+        bm_pc_ctrl1, bm_pc_ctrl2 = st.columns(2)
+        with bm_pc_ctrl1:
+            bm_pc_agg = st.selectbox(
+                "Data granularity",
+                options=list(FREQ_MAP.keys()),
+                index=list(FREQ_MAP.keys()).index("Daily"),
+                key="bm_pc_agg",
+            )
+        with bm_pc_ctrl2:
+            bm_pc_view = st.selectbox(
+                "Chart view",
+                options=CHART_VIEW_OPTIONS,
+                index=0,
+                key="bm_pc_view",
+                help=(
+                    "All series on one axis: compare absolute Bar values.\n"
+                    "Normalised: scale each site to 0-1 to compare patterns.\n"
+                    "Small multiples: one panel per site with its own axis."
+                ),
+            )
+        bm_pc_df = build_bm_comparison_df(FREQ_MAP[bm_pc_agg], start_date, end_date, remove_outliers)
+        bm_pc_plot = bm_pc_df[[c for c in _BM_PRES_COLS if c in bm_pc_df.columns]]
+        bm_pc_plot, _ = thin_time_series(bm_pc_plot)
+        if bm_pc_plot.empty:
+            st.info("No pressure data in the selected date range.")
+        else:
+            fig_bm_pc = render_comparison_chart(
+                bm_pc_plot,
+                f"Biomethane Pressure Comparison — {bm_pc_agg.lower()} averages",
+                "Time",
+                bm_pc_view,
+            )
+            fig_bm_pc.update_layout(yaxis_title="Outlet Pressure (Bar)")
+            st.plotly_chart(fig_bm_pc, width="stretch")
+
+    # ------------------------------------------------------------------
+    elif bm_section == "Flow and pressure per site":
+        st.markdown("## Flow and pressure per site")
+        st.caption(
+            "Flow on the left axis (solid line) and outlet pressure on the right axis "
+            "(dotted line) shown together for each site. "
+            "Use this to see how pressure and flow move together at each location."
+        )
+        bm_da_agg = st.selectbox(
+            "Data granularity",
+            options=list(FREQ_MAP.keys()),
+            index=list(FREQ_MAP.keys()).index("Daily"),
+            key="bm_da_agg",
+        )
+        for site in BM_SITES:
+            fig = _bm_dual_chart(
+                site,
+                bm_dfs_raw[site],
+                f"{site} — {bm_da_agg.lower()} averages",
+                freq=FREQ_MAP[bm_da_agg],
+                xaxis_title="Time",
+            )
+            if fig is None:
+                st.info(f"No data for {site} in the selected date range.")
+            else:
+                st.plotly_chart(fig, width="stretch")
+
+    # ------------------------------------------------------------------
+    elif bm_section == "Average by calendar month":
+        st.markdown("## Average by calendar month")
+        st.caption(
+            "Average flow and average pressure for each calendar month, "
+            "calculated across all years in the selected date range. "
+            "This shows the typical seasonal pattern for each site."
+        )
+        month_labels = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ]
+        bm_cal_view = st.selectbox(
+            "Chart view", options=CHART_VIEW_OPTIONS, index=0, key="bm_cal_view",
+        )
+        pat_df = build_bm_comparison_pattern_df("month", start_date, end_date, remove_outliers)
+        pat_df.index = month_labels[: len(pat_df)]
+
+        bm_cal_flow = pat_df[[c for c in _BM_FLOW_COLS if c in pat_df.columns]]
+        bm_cal_pres = pat_df[[c for c in _BM_PRES_COLS if c in pat_df.columns]]
+
+        if not bm_cal_flow.empty:
+            fig_bm_cal_f = render_comparison_chart(
+                bm_cal_flow,
+                "Average Flow by Calendar Month",
+                "Month",
+                bm_cal_view,
+                mode="lines+markers",
+                marker_size=8,
+            )
+            st.plotly_chart(fig_bm_cal_f, width="stretch")
+        if not bm_cal_pres.empty:
+            fig_bm_cal_p = render_comparison_chart(
+                bm_cal_pres,
+                "Average Outlet Pressure by Calendar Month",
+                "Month",
+                bm_cal_view,
+                mode="lines+markers",
+                marker_size=8,
+            )
+            fig_bm_cal_p.update_layout(yaxis_title="Outlet Pressure (Bar)")
+            st.plotly_chart(fig_bm_cal_p, width="stretch")
+
+    # ------------------------------------------------------------------
+    elif bm_section == "Average by hour of day":
+        st.markdown("## Average by hour of day")
+        st.caption(
+            "Average flow and pressure for each hour of the day, "
+            "across all days in the selected date range."
+        )
+        bm_hr_view = st.selectbox(
+            "Chart view", options=CHART_VIEW_OPTIONS, index=0, key="bm_hr_view",
+        )
+        hr_pat_df = build_bm_comparison_pattern_df("hour", start_date, end_date, remove_outliers)
+        bm_hr_flow = hr_pat_df[[c for c in _BM_FLOW_COLS if c in hr_pat_df.columns]]
+        bm_hr_pres = hr_pat_df[[c for c in _BM_PRES_COLS if c in hr_pat_df.columns]]
+
+        if not bm_hr_flow.empty:
+            fig_bm_hr_f = render_comparison_chart(
+                bm_hr_flow,
+                "Average Flow by Hour of Day",
+                "Hour of day (0-23)",
+                bm_hr_view,
+                mode="lines+markers",
+                marker_size=7,
+            )
+            st.plotly_chart(fig_bm_hr_f, width="stretch")
+        if not bm_hr_pres.empty:
+            fig_bm_hr_p = render_comparison_chart(
+                bm_hr_pres,
+                "Average Outlet Pressure by Hour of Day",
+                "Hour of day (0-23)",
+                bm_hr_view,
+                mode="lines+markers",
+                marker_size=7,
+            )
+            fig_bm_hr_p.update_layout(yaxis_title="Outlet Pressure (Bar)")
+            st.plotly_chart(fig_bm_hr_p, width="stretch")
+
+    # ------------------------------------------------------------------
+    elif bm_section == "Flow vs pressure scatter":
+        st.markdown("## Flow vs pressure scatter")
+        st.caption(
+            "Each dot is one averaged reading. "
+            "The shape of each site's cluster shows how pressure responds to changes in flow."
+        )
+
+        sc_ctrl1, sc_ctrl2 = st.columns(2)
+        with sc_ctrl1:
+            bm_sc_agg = st.selectbox(
+                "Aggregate to",
+                options=["Daily", "Hourly"],
+                index=0,
+                key="bm_sc_agg",
+            )
+        with sc_ctrl2:
+            bm_sc_view = st.selectbox(
+                "Chart view",
+                options=[
+                    "All sites on one chart",
+                    "One chart per site (actual values)",
+                    "One chart per site (normalised 0-1)",
+                ],
+                index=1,
+                key="bm_sc_view",
+                help=(
+                    "All sites on one chart: compare absolute flow and pressure values directly. "
+                    "Works best when the sites have similar pressure ranges.\n"
+                    "One chart per site (actual values): each site is a separate full chart "
+                    "with its own axes — no overlap, works well in full screen.\n"
+                    "One chart per site (normalised): both axes scaled to 0-1 per site so "
+                    "you can compare the shape of the relationship without the scale difference."
+                ),
+            )
+        sc_freq = "D" if bm_sc_agg == "Daily" else "h"
+        SC_MAX_POINTS = 10_000  # per site — keeps the browser responsive
+
+        if bm_sc_agg == "Hourly":
+            st.caption(
+                "Hourly data is downsampled to at most 10,000 points per site to keep "
+                "the chart responsive. Daily averages give a cleaner picture."
+            )
+
+        # Build one data dict per site
+        sc_site_data = {}
+        for site in BM_SITES:
+            meta = BM_SITES[site]
+            df_site = bm_dfs_raw[site]
+            flow_col = next((c for c in meta["flow_cols"] if c in df_site.columns), None)
+            pres_col = next((c for c in meta["pressure_cols"] if c in df_site.columns), None)
+            if flow_col is None or pres_col is None or df_site.empty:
+                continue
+            sub = df_site[[flow_col, pres_col]].dropna().resample(sc_freq).mean().dropna()
+            if sub.empty:
+                continue
+            # Thin to SC_MAX_POINTS using uniform stride so the point cloud
+            # remains representative rather than just taking the first N rows.
+            if len(sub) > SC_MAX_POINTS:
+                step = math.ceil(len(sub) / SC_MAX_POINTS)
+                sub = sub.iloc[::step]
+            sc_site_data[site] = {
+                "flow": sub[flow_col] * meta["flow_scale"],
+                "pres": sub[pres_col],
+                "colour": LOCATION_COLOURS.get(site, "#6366f1"),
+            }
+
+        if not sc_site_data:
+            st.info("No data available for the selected date range.")
+
+        elif bm_sc_view == "All sites on one chart":
+            fig_bm_sc = go.Figure()
+            for site, sd in sc_site_data.items():
+                fig_bm_sc.add_trace(
+                    go.Scatter(
+                        x=sd["flow"], y=sd["pres"],
+                        mode="markers", name=site,
+                        marker=dict(size=5, color=sd["colour"], opacity=0.65),
+                        hovertemplate=(
+                            f"<b>{site}</b><br>"
+                            f"Flow: %{{x:,.3f}} Kscmh<br>"
+                            f"Pressure: %{{y:,.3f}} Bar<extra></extra>"
+                        ),
+                    )
+                )
+            fig_bm_sc.update_layout(xaxis_title="Flow (Kscmh)", yaxis_title="Outlet Pressure (Bar)")
+            fig_bm_sc = apply_dark_layout(
+                fig_bm_sc, f"Flow vs Outlet Pressure — all sites ({bm_sc_agg.lower()})"
+            )
+            st.plotly_chart(fig_bm_sc, width="stretch")
+
+        elif bm_sc_view == "One chart per site (actual values)":
+            for site, sd in sc_site_data.items():
+                fig_s = go.Figure()
+                fig_s.add_trace(
+                    go.Scatter(
+                        x=sd["flow"], y=sd["pres"],
+                        mode="markers", name=site,
+                        marker=dict(size=5, color=sd["colour"], opacity=0.65),
+                        showlegend=False,
+                        hovertemplate=(
+                            f"<b>{site}</b><br>"
+                            f"Flow: %{{x:,.3f}} Kscmh<br>"
+                            f"Pressure: %{{y:,.3f}} Bar<extra></extra>"
+                        ),
+                    )
+                )
+                fig_s.update_layout(xaxis_title="Flow (Kscmh)", yaxis_title="Outlet Pressure (Bar)")
+                fig_s = apply_dark_layout(
+                    fig_s, f"{site} — Flow vs Outlet Pressure ({bm_sc_agg.lower()})"
+                )
+                st.plotly_chart(fig_s, width="stretch")
+
+        else:  # One chart per site (normalised 0-1)
+            st.caption(
+                "Both axes are scaled to 0-1 per site so the shape of the relationship "
+                "can be compared without the scale difference getting in the way."
+            )
+            for site, sd in sc_site_data.items():
+                f_min, f_max = sd["flow"].min(), sd["flow"].max()
+                p_min, p_max = sd["pres"].min(), sd["pres"].max()
+                f_norm = (sd["flow"] - f_min) / max(f_max - f_min, 1e-9)
+                p_norm = (sd["pres"] - p_min) / max(p_max - p_min, 1e-9)
+                fig_s = go.Figure()
+                fig_s.add_trace(
+                    go.Scatter(
+                        x=f_norm, y=p_norm,
+                        mode="markers", name=site,
+                        marker=dict(size=5, color=sd["colour"], opacity=0.65),
+                        showlegend=False,
+                        hovertemplate=(
+                            f"<b>{site}</b><br>"
+                            f"Flow (norm): %{{x:.3f}}<br>"
+                            f"Pressure (norm): %{{y:.3f}}<extra></extra>"
+                        ),
+                    )
+                )
+                fig_s.update_layout(
+                    xaxis_title="Flow (0 = min, 1 = max)",
+                    yaxis_title="Pressure (0 = min, 1 = max)",
+                )
+                fig_s = apply_dark_layout(
+                    fig_s, f"{site} — Flow vs Outlet Pressure, normalised ({bm_sc_agg.lower()})"
+                )
+                st.plotly_chart(fig_s, width="stretch")
+
+    # ------------------------------------------------------------------
+    elif bm_section == "Seasonal trend by year":
+        st.markdown("## Seasonal trend by year")
+        st.caption(
+            "Mean daily value per season per year for one site. "
+            "Winter groups December with the following January and February. "
+            "Larger markers mean more days of data contributed to that season average."
+        )
+        bm_seas_site = st.selectbox(
+            "Site", options=list(BM_SITES.keys()), key="bm_seas_site"
+        )
+        meta = BM_SITES[bm_seas_site]
+        df_site = bm_dfs_raw[bm_seas_site]
+        colour = LOCATION_COLOURS.get(bm_seas_site, "#6366f1")
+        all_cols = meta["flow_cols"] + meta["pressure_cols"]
+        for col in [c for c in all_cols if c in df_site.columns]:
+            series = df_site[col].dropna()
+            if col in meta["flow_cols"]:
+                series = series * meta["flow_scale"]
+                y_label = meta["flow_label"]
+            else:
+                y_label = meta["pressure_label"]
+            display_name = SERIES_DISPLAY_NAMES.get(col, col)
+            fig_seas, seas_summary = build_seasonal_trend_chart(
+                series,
+                col,
+                f"{bm_seas_site} — {display_name} — Seasonal Trend",
+                colour,
+                flow_unit="Kscmh",
+                loc_flow_unit=None,
+            )
+            if fig_seas is None:
+                st.info(f"No seasonal data for {display_name}.")
+            else:
+                fig_seas.update_yaxes(title_text=y_label)
+                partial = int((seas_summary["CoveragePct"] < 99.9).sum())
+                if partial:
+                    st.caption(f"{partial} season-year point(s) have partial coverage.")
+                st.plotly_chart(fig_seas, width="stretch")
+
+    # ------------------------------------------------------------------
+    elif bm_section == "Distribution by year":
+        st.markdown("## Distribution of values by year")
+        st.caption(
+            "Box plots showing the spread of daily averages for each year. "
+            "The box covers the middle 50% of values; the line inside is the median."
+        )
+        bm_box_site = st.selectbox(
+            "Site", options=list(BM_SITES.keys()), key="bm_box_site"
+        )
+        meta = BM_SITES[bm_box_site]
+        df_site = bm_dfs_raw[bm_box_site]
+        colour = LOCATION_COLOURS.get(bm_box_site, "#6366f1")
+        available_cols = [c for c in meta["flow_cols"] + meta["pressure_cols"] if c in df_site.columns]
+        if not available_cols or df_site.empty:
+            st.info(f"No data for {bm_box_site} in the selected date range.")
+        else:
+            bm_box_col = st.selectbox(
+                "Series",
+                options=available_cols,
+                format_func=lambda c: SERIES_DISPLAY_NAMES.get(c, c),
+                key="bm_box_col",
+            )
+            display_df_box = df_site.copy()
+            if bm_box_col in meta["flow_cols"]:
+                display_df_box[bm_box_col] = display_df_box[bm_box_col] * meta["flow_scale"]
+            fig_box = build_yearly_box_plot(
+                display_df_box,
+                bm_box_col,
+                f"{bm_box_site} — {SERIES_DISPLAY_NAMES.get(bm_box_col, bm_box_col)} — Distribution by Year",
+                BM_COLOUR_MAPS[bm_box_site].get(bm_box_col, colour),
+                flow_unit="Kscmh",
+            )
+            if fig_box is None:
+                st.info("No data available for that series in the selected date range.")
+            else:
+                st.caption("Built from precomputed yearly box statistics.")
+                st.plotly_chart(fig_box, width="stretch")
+
+    # ------------------------------------------------------------------
+    elif bm_section == "Correlation between sites":
+        st.markdown("## Correlation between sites")
+        st.caption(
+            "Pearson correlation between daily averages across all three sites. "
+            "A value of 1 means two series always move together. "
+            "A value of 0 means no relationship. A value of -1 means they move in opposite directions."
+        )
+        bm_corr_df = build_bm_comparison_df("D", start_date, end_date, remove_outliers).corr()
+        fig_bm_corr = build_correlation_heatmap(
+            bm_corr_df, "Correlation between biomethane sites — daily averages"
+        )
+        st.plotly_chart(fig_bm_corr, width="stretch")
+
+    # ------------------------------------------------------------------
+    elif bm_section == "Raw data":
+        st.markdown("## Raw data")
+        for site in BM_SITES:
+            colour = LOCATION_COLOURS.get(site, "#6366f1")
+            st.markdown(
+                f"<h4 style='color:{colour};'>{site}</h4>", unsafe_allow_html=True
+            )
+            with st.expander(f"Show {site} raw data (first and last 100 rows)", expanded=False):
+                show_head_tail_dataframe(bm_dfs_raw[site])
