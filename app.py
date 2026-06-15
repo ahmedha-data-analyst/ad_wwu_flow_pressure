@@ -53,7 +53,7 @@ DARK_THEME = {
     "metric_border": "rgba(255, 255, 255, 0.10)",
     "table_bg": "rgba(27, 34, 43, 0.96)",
     "table_border": "rgba(255, 255, 255, 0.08)",
-    "chart_bg": "rgba(27, 34, 43, 0.45)",
+    "chart_bg": "#1b222b",
     "chart_border": "rgba(255, 255, 255, 0.06)",
     "hero_bg": (
         "linear-gradient(90deg, rgba(12, 16, 24, 0.90) 0%, "
@@ -84,7 +84,7 @@ LIGHT_THEME = {
     "metric_border": "rgba(73, 152, 35, 0.15)",
     "table_bg": "#ffffff",
     "table_border": "rgba(73, 152, 35, 0.15)",
-    "chart_bg": "rgba(255, 255, 255, 0.80)",
+    "chart_bg": "#ffffff",
     "chart_border": "rgba(73, 152, 35, 0.14)",
     "hero_bg": (
         "linear-gradient(90deg, rgba(247, 249, 244, 0.97) 0%, "
@@ -619,9 +619,10 @@ st.markdown(
         background-color: var(--hs-chart-bg);
         border: 1px solid var(--hs-chart-border);
         border-radius: 12px;
-        padding: 0.55rem 1.45rem 0.25rem 0.55rem;
+        padding: 0.55rem 0.55rem 0.25rem 0.55rem;
         margin-bottom: 1.1rem;
         box-sizing: border-box;
+        overflow: hidden;
     }}
     .stPlotlyChart .js-plotly-plot .plotly .modebar {{
         right: 2.8rem !important;
@@ -1117,7 +1118,7 @@ def apply_dark_layout(fig, title):
             y=1.02,
             x=0,
         ),
-        margin=dict(l=66, r=72, t=78, b=62),
+        margin=dict(l=66, r=50, t=78, b=62),
         hovermode="x unified",
     )
     fig.update_xaxes(
@@ -1983,7 +1984,7 @@ def build_comparison_chart_small_multiples(plot_df, title, xaxis_title, mode="li
         paper_bgcolor=PANEL_BG,
         font=dict(color=TEXT_COL, family="Hind, sans-serif"),
         title=dict(text=title, font=dict(size=20, color=TEXT_COL, family="Hind, sans-serif")),
-        margin=dict(l=66, r=72, t=90, b=62),
+        margin=dict(l=66, r=50, t=90, b=62),
         hovermode="x unified",
     )
     fig.update_xaxes(
