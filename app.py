@@ -1,5 +1,6 @@
 import base64
 import math
+from itertools import zip_longest
 from pathlib import Path
 
 import pandas as pd
@@ -26,13 +27,86 @@ st.set_option("client.toolbarMode", "viewer")
 # ------------------------------------------------------
 PRIMARY_COLOUR = "#a7d730"
 SECONDARY_COLOUR = "#499823"
-DARK_GREY = "#30343c"
 LIGHT_GREY = "#8c919a"
-BACKGROUND = "#0e1117"
-PANEL_BG = "#1b222b"
-TEXT_COL = "#f2f4f7"
-SUBTEXT_COL = LIGHT_GREY
-ACCENT_COLOUR = "#86d5f8"
+
+# ------------------------------------------------------
+# THEME TOKENS (dark / light)
+# ------------------------------------------------------
+# Everything that changes between dark and light mode lives here. Brand and
+# per-location/series colours (PRIMARY_COLOUR, LOCATION_COLOURS,
+# SERIES_COLOUR_MAPS, etc.) are intentionally NOT theme-dependent — only the
+# page chrome (backgrounds, text, borders, chart panels) changes.
+DARK_THEME = {
+    "bg": "#0e1117",
+    "bg_gradient_1": "rgba(167, 215, 48, 0.11)",
+    "bg_gradient_2": "rgba(134, 213, 248, 0.08)",
+    "panel": "#1b222b",
+    "text": "#f2f4f7",
+    "subtext": "#8c919a",
+    "accent": "#86d5f8",
+    "sidebar_bg": "#30343c",
+    "sidebar_border": "rgba(255, 255, 255, 0.08)",
+    "sidebar_text": "#ffffff",
+    "input_bg": "rgba(255, 255, 255, 0.06)",
+    "input_border": "rgba(255, 255, 255, 0.16)",
+    "metric_bg": "linear-gradient(180deg, rgba(27, 34, 43, 0.96) 0%, rgba(22, 29, 37, 0.96) 100%)",
+    "metric_border": "rgba(255, 255, 255, 0.10)",
+    "table_bg": "rgba(27, 34, 43, 0.96)",
+    "table_border": "rgba(255, 255, 255, 0.08)",
+    "chart_bg": "rgba(27, 34, 43, 0.45)",
+    "chart_border": "rgba(255, 255, 255, 0.06)",
+    "hero_bg": (
+        "linear-gradient(90deg, rgba(12, 16, 24, 0.90) 0%, "
+        "rgba(18, 30, 22, 0.88) 72%, rgba(29, 52, 33, 0.78) 100%)"
+    ),
+    "hero_border": "rgba(255, 255, 255, 0.12)",
+    "logo_filter": "drop-shadow(0 6px 14px rgba(0, 0, 0, 0.35))",
+    "grid_colour": "rgba(255,255,255,0.08)",
+    "line_colour": "rgba(255,255,255,0.18)",
+    "grid_colour_dim": "rgba(255,255,255,0.04)",
+    "line_colour_dim": "rgba(255,255,255,0.12)",
+    "plotly_template": "plotly_dark",
+}
+LIGHT_THEME = {
+    "bg": "#f7f9f4",
+    "bg_gradient_1": "rgba(167, 215, 48, 0.09)",
+    "bg_gradient_2": "rgba(73, 152, 35, 0.06)",
+    "panel": "#ffffff",
+    "text": "#1a2010",
+    "subtext": "#4a5240",
+    "accent": "#0284c7",
+    "sidebar_bg": "#eef3e6",
+    "sidebar_border": "rgba(73, 152, 35, 0.20)",
+    "sidebar_text": "#1a2010",
+    "input_bg": "rgba(255, 255, 255, 0.85)",
+    "input_border": "rgba(73, 152, 35, 0.30)",
+    "metric_bg": "linear-gradient(180deg, #ffffff 0%, #f7f9f4 100%)",
+    "metric_border": "rgba(73, 152, 35, 0.15)",
+    "table_bg": "#ffffff",
+    "table_border": "rgba(73, 152, 35, 0.15)",
+    "chart_bg": "rgba(255, 255, 255, 0.80)",
+    "chart_border": "rgba(73, 152, 35, 0.14)",
+    "hero_bg": (
+        "linear-gradient(90deg, rgba(247, 249, 244, 0.97) 0%, "
+        "rgba(230, 240, 218, 0.95) 70%, rgba(210, 235, 185, 0.90) 100%)"
+    ),
+    "hero_border": "rgba(73, 152, 35, 0.20)",
+    "logo_filter": "none",
+    "grid_colour": "rgba(0,0,0,0.08)",
+    "line_colour": "rgba(0,0,0,0.20)",
+    "grid_colour_dim": "rgba(0,0,0,0.04)",
+    "line_colour_dim": "rgba(0,0,0,0.10)",
+    "plotly_template": "plotly_white",
+}
+
+
+def is_light() -> bool:
+    return st.session_state.get("theme", "dark") == "light"
+
+
+def get_theme() -> dict:
+    return LIGHT_THEME if is_light() else DARK_THEME
+
 
 LOCATION_COLOURS = {
     "Great Hele": "#9bc53d",
@@ -238,6 +312,11 @@ COMPARE_SERIES = {
     },
 }
 
+# Small-multiples grid order for the "All Locations" page: primary network
+# sites on the left column, biomethane injection sites on the right column.
+COMPARE_PRIMARY_SERIES = ["High Bickington", "Whitminster", "Malmesbury", "Aylesbeare"]
+COMPARE_BIOMETHANE_SERIES = ["Great Hele", "Enfield flow (F1)", "Charlton flow (F1)"]
+
 COMPARE_SERIES_COLOURS = {
     "Great Hele": LOCATION_COLOURS["Great Hele"],
     "High Bickington": LOCATION_COLOURS["High Bickington"],
@@ -254,200 +333,6 @@ COMPARE_SERIES_COLOURS = {
     "Charlton \u2014 Pressure (Bar)":   "#2dd4bf",
     "Great Hele \u2014 Pressure (Bar)": "#c5e67a",
 }
-
-
-# ------------------------------------------------------
-# GLOBAL CSS TO FORCE DARK UI
-# ------------------------------------------------------
-st.markdown(
-    f"""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Hind:wght@300;400;500;600;700&display=swap');
-
-    :root {{
-        --hs-primary: {PRIMARY_COLOUR};
-        --hs-secondary: {SECONDARY_COLOUR};
-        --hs-bg: {BACKGROUND};
-        --hs-card: {PANEL_BG};
-        --hs-text: {TEXT_COL};
-        --hs-subtext: {SUBTEXT_COL};
-        --hs-sidebar: {DARK_GREY};
-    }}
-
-    html, body, [class*="css"] {{
-        font-family: 'Hind', sans-serif;
-    }}
-
-    .stApp {{
-        background:
-            radial-gradient(circle at top right, rgba(167, 215, 48, 0.11) 0%, rgba(14, 17, 23, 0) 35%),
-            radial-gradient(circle at bottom left, rgba(134, 213, 248, 0.08) 0%, rgba(14, 17, 23, 0) 40%),
-            var(--hs-bg);
-        color: var(--hs-text);
-    }}
-    .block-container {{
-        padding-top: 1.8rem;
-        padding-bottom: 2rem;
-        color: var(--hs-text);
-    }}
-    h1, h2, h3, h4, h5, h6 {{
-        color: var(--hs-text) !important;
-        font-weight: 700;
-        letter-spacing: 0.1px;
-    }}
-    p, span, label {{
-        color: var(--hs-text) !important;
-    }}
-    .stCaption, .stMarkdown small {{
-        color: var(--hs-subtext) !important;
-    }}
-    section[data-testid="stSidebar"] > div {{
-        background-color: var(--hs-sidebar);
-        border-right: 1px solid rgba(255, 255, 255, 0.08);
-    }}
-    section[data-testid="stSidebar"] .stMarkdown p,
-    section[data-testid="stSidebar"] .stMarkdown span,
-    section[data-testid="stSidebar"] label {{
-        color: #ffffff !important;
-    }}
-    div[data-baseweb="select"] > div,
-    div[data-baseweb="input"] > div,
-    div[data-baseweb="textarea"] > div {{
-        background-color: rgba(255, 255, 255, 0.06);
-        border-color: rgba(255, 255, 255, 0.16);
-    }}
-    .stDateInput > div > div,
-    .stMultiSelect > div > div,
-    .stSelectbox > div > div {{
-        background-color: rgba(255, 255, 255, 0.06);
-    }}
-    .stSlider > div > div > div {{
-        background-color: rgba(167, 215, 48, 0.18);
-    }}
-    .stSlider [data-testid="stTickBar"] > div {{
-        background-color: rgba(167, 215, 48, 0.40);
-    }}
-    .st-bx, .stTextInput, .stNumberInput, .stDateInput, .stSelectbox, .stMultiSelect {{
-        color: var(--hs-text) !important;
-    }}
-    .stButton > button {{
-        background-color: var(--hs-primary);
-        color: #1d2430;
-        font-weight: 700;
-        border: none;
-        border-radius: 8px;
-    }}
-    .stButton > button:hover {{
-        background-color: var(--hs-secondary);
-        color: #ffffff;
-    }}
-    div[data-testid="metric-container"] {{
-        background: linear-gradient(180deg, rgba(27, 34, 43, 0.96) 0%, rgba(22, 29, 37, 0.96) 100%);
-        border: 1px solid rgba(255, 255, 255, 0.10);
-        border-left: 5px solid var(--hs-primary);
-        border-radius: 12px;
-        padding: 0.85rem 1rem;
-        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.24);
-    }}
-    div[data-testid="metric-container"] label {{
-        color: var(--hs-subtext) !important;
-        font-size: 0.86rem !important;
-        letter-spacing: 0.35px;
-        text-transform: uppercase;
-    }}
-    div[data-testid="metric-container"] [data-testid="stMetricValue"] {{
-        color: var(--hs-text) !important;
-        font-weight: 700;
-        line-height: 1.1;
-    }}
-    div[data-testid="stDataFrame"] {{
-        background-color: rgba(27, 34, 43, 0.96);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 12px;
-        padding: 0.2rem;
-    }}
-    .stPlotlyChart {{
-        background-color: rgba(27, 34, 43, 0.45);
-        border: 1px solid rgba(255, 255, 255, 0.06);
-        border-radius: 12px;
-        padding: 0.55rem 1.45rem 0.25rem 0.55rem;
-        margin-bottom: 1.1rem;
-        box-sizing: border-box;
-    }}
-    .stPlotlyChart .js-plotly-plot .plotly .modebar {{
-        right: 2.8rem !important;
-    }}
-    div[data-testid="stElementContainer"] > div[data-testid="stElementToolbar"] {{
-        top: 0.35rem !important;
-        right: 0.45rem !important;
-        z-index: 30 !important;
-        opacity: 1 !important;
-        visibility: visible !important;
-        pointer-events: auto !important;
-    }}
-    .hero-banner {{
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 1.2rem;
-        padding: 1.1rem 1.25rem;
-        border-radius: 14px;
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        background: linear-gradient(
-            90deg,
-            rgba(12, 16, 24, 0.90) 0%,
-            rgba(18, 30, 22, 0.88) 72%,
-            rgba(29, 52, 33, 0.78) 100%
-        );
-        margin-bottom: 1.4rem;
-    }}
-    .hero-copy {{
-        max-width: 68%;
-    }}
-    .hero-title {{
-        margin: 0;
-        color: var(--hs-text);
-        font-size: clamp(2.0rem, 2.8vw, 2.8rem);
-        line-height: 1.1;
-        font-weight: 700;
-    }}
-    .hero-subtitle {{
-        margin: 0.45rem 0 0 0;
-        color: var(--hs-subtext);
-        font-size: 1rem;
-    }}
-    .hero-logos {{
-        display: flex;
-        align-items: center;
-        justify-content: flex-end;
-        gap: 1rem;
-        flex-wrap: nowrap;
-    }}
-    .hero-logos img {{
-        height: 112px;
-        width: auto;
-        object-fit: contain;
-        filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.35));
-    }}
-    @media (max-width: 1080px) {{
-        .hero-banner {{
-            flex-direction: column;
-            align-items: flex-start;
-        }}
-        .hero-copy {{
-            max-width: 100%;
-        }}
-        .hero-logos {{
-            justify-content: flex-start;
-        }}
-        .hero-logos img {{
-            height: 88px;
-        }}
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
 
 # ======================================================
@@ -582,6 +467,233 @@ def get_compare_date_bounds():
         maxs.append(series.index.max())
     return min(mins).date(), max(maxs).date()
 
+
+# ======================================================
+# SIDEBAR – THEME TOGGLE
+# ======================================================
+_light_mode = st.sidebar.toggle(
+    "Light mode",
+    value=st.session_state.get("theme", "dark") == "light",
+    help="Switch between dark and light dashboard themes",
+)
+st.session_state["theme"] = "light" if _light_mode else "dark"
+
+# Resolve the active theme tokens now that the toggle has been read. Every
+# function defined below looks up these module-level names at call-time, so
+# this single assignment is enough for the whole script — including the CSS
+# injected immediately below — to render in the selected theme for this run.
+_theme = get_theme()
+BACKGROUND = _theme["bg"]
+PANEL_BG = _theme["panel"]
+TEXT_COL = _theme["text"]
+SUBTEXT_COL = _theme["subtext"]
+ACCENT_COLOUR = _theme["accent"]
+DARK_GREY = _theme["sidebar_bg"]
+
+# ------------------------------------------------------
+# GLOBAL CSS (theme-aware)
+# ------------------------------------------------------
+st.markdown(
+    f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Hind:wght@300;400;500;600;700&display=swap');
+
+    :root {{
+        --hs-primary: {PRIMARY_COLOUR};
+        --hs-secondary: {SECONDARY_COLOUR};
+        --hs-bg: {BACKGROUND};
+        --hs-card: {PANEL_BG};
+        --hs-text: {TEXT_COL};
+        --hs-subtext: {SUBTEXT_COL};
+        --hs-sidebar: {DARK_GREY};
+        --hs-sidebar-border: {_theme["sidebar_border"]};
+        --hs-sidebar-text: {_theme["sidebar_text"]};
+        --hs-input-bg: {_theme["input_bg"]};
+        --hs-input-border: {_theme["input_border"]};
+        --hs-metric-bg: {_theme["metric_bg"]};
+        --hs-metric-border: {_theme["metric_border"]};
+        --hs-table-bg: {_theme["table_bg"]};
+        --hs-table-border: {_theme["table_border"]};
+        --hs-chart-bg: {_theme["chart_bg"]};
+        --hs-chart-border: {_theme["chart_border"]};
+        --hs-hero-bg: {_theme["hero_bg"]};
+        --hs-hero-border: {_theme["hero_border"]};
+        --hs-logo-filter: {_theme["logo_filter"]};
+        --hs-grad-1: {_theme["bg_gradient_1"]};
+        --hs-grad-2: {_theme["bg_gradient_2"]};
+    }}
+
+    html, body, [class*="css"] {{
+        font-family: 'Hind', sans-serif;
+    }}
+
+    .stApp {{
+        background:
+            radial-gradient(circle at top right, var(--hs-grad-1) 0%, rgba(0, 0, 0, 0) 35%),
+            radial-gradient(circle at bottom left, var(--hs-grad-2) 0%, rgba(0, 0, 0, 0) 40%),
+            var(--hs-bg);
+        color: var(--hs-text);
+    }}
+    .block-container {{
+        padding-top: 1.8rem;
+        padding-bottom: 2rem;
+        color: var(--hs-text);
+    }}
+    h1, h2, h3, h4, h5, h6 {{
+        color: var(--hs-text) !important;
+        font-weight: 700;
+        letter-spacing: 0.1px;
+    }}
+    p, span, label {{
+        color: var(--hs-text) !important;
+    }}
+    .stCaption, .stMarkdown small {{
+        color: var(--hs-subtext) !important;
+    }}
+    section[data-testid="stSidebar"] > div {{
+        background-color: var(--hs-sidebar);
+        border-right: 1px solid var(--hs-sidebar-border);
+    }}
+    section[data-testid="stSidebar"] .stMarkdown p,
+    section[data-testid="stSidebar"] .stMarkdown span,
+    section[data-testid="stSidebar"] label {{
+        color: var(--hs-sidebar-text) !important;
+    }}
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="textarea"] > div {{
+        background-color: var(--hs-input-bg);
+        border-color: var(--hs-input-border);
+    }}
+    .stDateInput > div > div,
+    .stMultiSelect > div > div,
+    .stSelectbox > div > div {{
+        background-color: var(--hs-input-bg);
+    }}
+    .stSlider > div > div > div {{
+        background-color: rgba(167, 215, 48, 0.18);
+    }}
+    .stSlider [data-testid="stTickBar"] > div {{
+        background-color: rgba(167, 215, 48, 0.40);
+    }}
+    .st-bx, .stTextInput, .stNumberInput, .stDateInput, .stSelectbox, .stMultiSelect {{
+        color: var(--hs-text) !important;
+    }}
+    .stButton > button {{
+        background-color: var(--hs-primary);
+        color: #1d2430;
+        font-weight: 700;
+        border: none;
+        border-radius: 8px;
+    }}
+    .stButton > button:hover {{
+        background-color: var(--hs-secondary);
+        color: #ffffff;
+    }}
+    div[data-testid="metric-container"] {{
+        background: var(--hs-metric-bg);
+        border: 1px solid var(--hs-metric-border);
+        border-left: 5px solid var(--hs-primary);
+        border-radius: 12px;
+        padding: 0.85rem 1rem;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.24);
+    }}
+    div[data-testid="metric-container"] label {{
+        color: var(--hs-subtext) !important;
+        font-size: 0.86rem !important;
+        letter-spacing: 0.35px;
+        text-transform: uppercase;
+    }}
+    div[data-testid="metric-container"] [data-testid="stMetricValue"] {{
+        color: var(--hs-text) !important;
+        font-weight: 700;
+        line-height: 1.1;
+    }}
+    div[data-testid="stDataFrame"] {{
+        background-color: var(--hs-table-bg);
+        border: 1px solid var(--hs-table-border);
+        border-radius: 12px;
+        padding: 0.2rem;
+    }}
+    .stPlotlyChart {{
+        background-color: var(--hs-chart-bg);
+        border: 1px solid var(--hs-chart-border);
+        border-radius: 12px;
+        padding: 0.55rem 1.45rem 0.25rem 0.55rem;
+        margin-bottom: 1.1rem;
+        box-sizing: border-box;
+    }}
+    .stPlotlyChart .js-plotly-plot .plotly .modebar {{
+        right: 2.8rem !important;
+    }}
+    div[data-testid="stElementContainer"] > div[data-testid="stElementToolbar"] {{
+        top: 0.35rem !important;
+        right: 0.45rem !important;
+        z-index: 30 !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        pointer-events: auto !important;
+    }}
+    .hero-banner {{
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1.2rem;
+        padding: 1.1rem 1.25rem;
+        border-radius: 14px;
+        border: 1px solid var(--hs-hero-border);
+        background: var(--hs-hero-bg);
+        margin-bottom: 1.4rem;
+    }}
+    .hero-copy {{
+        max-width: 68%;
+    }}
+    .hero-title {{
+        margin: 0;
+        color: var(--hs-text);
+        font-size: clamp(2.0rem, 2.8vw, 2.8rem);
+        line-height: 1.1;
+        font-weight: 700;
+    }}
+    .hero-subtitle {{
+        margin: 0.45rem 0 0 0;
+        color: var(--hs-subtext);
+        font-size: 1rem;
+    }}
+    .hero-logos {{
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 1rem;
+        flex-wrap: nowrap;
+    }}
+    .hero-logos img {{
+        height: 112px;
+        width: auto;
+        object-fit: contain;
+        filter: var(--hs-logo-filter);
+    }}
+    @media (max-width: 1080px) {{
+        .hero-banner {{
+            flex-direction: column;
+            align-items: flex-start;
+        }}
+        .hero-copy {{
+            max-width: 100%;
+        }}
+        .hero-logos {{
+            justify-content: flex-start;
+        }}
+        .hero-logos img {{
+            height: 88px;
+        }}
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.sidebar.markdown("---")
 
 # ======================================================
 # SIDEBAR – VIEW MODE
@@ -982,14 +1094,20 @@ st.markdown(
 # HELPER: DARK PLOTLY LAYOUT
 # ======================================================
 def apply_dark_layout(fig, title):
+    """Apply the dashboard's chart styling for the active theme.
+
+    Named for the dark theme this dashboard launched with; it now also
+    handles the light theme via the module-level theme tokens.
+    """
+    theme = get_theme()
     fig.update_layout(
         title=dict(
             text=title,
             font=dict(size=20, color=TEXT_COL, family="Hind, sans-serif"),
         ),
-        template="plotly_dark",
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
+        template=theme["plotly_template"],
+        plot_bgcolor=PANEL_BG,
+        paper_bgcolor=PANEL_BG,
         font=dict(color=TEXT_COL, family="Hind, sans-serif"),
         colorway=list(LOCATION_COLOURS.values()),
         legend=dict(
@@ -1003,13 +1121,13 @@ def apply_dark_layout(fig, title):
         hovermode="x unified",
     )
     fig.update_xaxes(
-        gridcolor="rgba(255,255,255,0.08)",
-        linecolor="rgba(255,255,255,0.18)",
+        gridcolor=theme["grid_colour"],
+        linecolor=theme["line_colour"],
         automargin=True,
     )
     fig.update_yaxes(
-        gridcolor="rgba(255,255,255,0.08)",
-        linecolor="rgba(255,255,255,0.18)",
+        gridcolor=theme["grid_colour"],
+        linecolor=theme["line_colour"],
         automargin=True,
     )
     return fig
@@ -1799,8 +1917,28 @@ def build_comparison_chart_normalised(plot_df, title, xaxis_title, mode="lines",
 
 
 def build_comparison_chart_small_multiples(plot_df, title, xaxis_title, mode="lines", marker_size=7):
-    """One subplot per series, each with its own independent y-axis."""
-    cols = [c for c in plot_df.columns if plot_df[c].notna().any()]
+    """One subplot per series, each with its own independent y-axis.
+
+    On the "All Locations" page, columns are arranged into a 2-column grid
+    with primary network sites on the left and biomethane injection sites
+    on the right, row by row. Any columns outside those two known groups
+    (e.g. a future site) are appended afterwards in their original order.
+    """
+    theme = get_theme()
+    available = [c for c in plot_df.columns if plot_df[c].notna().any()]
+    left = [c for c in COMPARE_PRIMARY_SERIES if c in available]
+    right = [c for c in COMPARE_BIOMETHANE_SERIES if c in available]
+    known = set(left + right)
+    leftover = [c for c in available if c not in known]
+
+    cols = []
+    for left_col, right_col in zip_longest(left, right):
+        if left_col is not None:
+            cols.append(left_col)
+        if right_col is not None:
+            cols.append(right_col)
+    cols += leftover
+
     n = len(cols)
     if n == 0:
         return go.Figure()
@@ -1834,15 +1972,15 @@ def build_comparison_chart_small_multiples(plot_df, title, xaxis_title, mode="li
             trace_kwargs["marker"] = dict(size=marker_size)
         fig.add_trace(go.Scatter(**trace_kwargs), row=row, col=col_pos)
         fig.update_yaxes(title_text="Kscmh", row=row, col=col_pos,
-                         gridcolor="rgba(255,255,255,0.08)",
-                         linecolor="rgba(255,255,255,0.18)")
+                         gridcolor=theme["grid_colour"],
+                         linecolor=theme["line_colour"])
 
     height = 260 * nrows + 80
     fig.update_layout(
         height=height,
-        template="plotly_dark",
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
+        template=theme["plotly_template"],
+        plot_bgcolor=PANEL_BG,
+        paper_bgcolor=PANEL_BG,
         font=dict(color=TEXT_COL, family="Hind, sans-serif"),
         title=dict(text=title, font=dict(size=20, color=TEXT_COL, family="Hind, sans-serif")),
         margin=dict(l=66, r=72, t=90, b=62),
@@ -1850,8 +1988,8 @@ def build_comparison_chart_small_multiples(plot_df, title, xaxis_title, mode="li
     )
     fig.update_xaxes(
         title_text=xaxis_title,
-        gridcolor="rgba(255,255,255,0.08)",
-        linecolor="rgba(255,255,255,0.18)",
+        gridcolor=theme["grid_colour"],
+        linecolor=theme["line_colour"],
         automargin=True,
     )
     for annotation in fig.layout.annotations:
@@ -1894,6 +2032,7 @@ def build_dual_axis_chart(
     """
     from plotly.subplots import make_subplots
 
+    theme = get_theme()
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     default_colour = next(iter(colour_map.values()), "#6366f1")
@@ -1936,20 +2075,20 @@ def build_dual_axis_chart(
     fig.update_yaxes(
         title_text=flow_label,
         secondary_y=False,
-        gridcolor="rgba(255,255,255,0.08)",
-        linecolor="rgba(255,255,255,0.18)",
+        gridcolor=theme["grid_colour"],
+        linecolor=theme["line_colour"],
     )
     fig.update_yaxes(
         title_text=pressure_label,
         secondary_y=True,
-        gridcolor="rgba(255,255,255,0.04)",
-        linecolor="rgba(255,255,255,0.12)",
+        gridcolor=theme["grid_colour_dim"],
+        linecolor=theme["line_colour_dim"],
         showgrid=False,
     )
     fig.update_xaxes(
         title_text=xaxis_title,
-        gridcolor="rgba(255,255,255,0.08)",
-        linecolor="rgba(255,255,255,0.18)",
+        gridcolor=theme["grid_colour"],
+        linecolor=theme["line_colour"],
         automargin=True,
     )
     fig = apply_dark_layout(fig, title)
@@ -2128,7 +2267,7 @@ fig_map.update_layout(
     ),
     margin=dict(l=0, r=0, t=0, b=0),
     height=420,
-    paper_bgcolor="rgba(0,0,0,0)",
+    paper_bgcolor=PANEL_BG,
     font=dict(color=TEXT_COL),
 )
 st.plotly_chart(fig_map, width="stretch")
@@ -2238,7 +2377,7 @@ if is_compare:
             trend_chart_view = st.selectbox(
                 "Chart view",
                 options=CHART_VIEW_OPTIONS,
-                index=0,
+                index=2,
                 key="trend_chart_view",
                 help=(
                     "All series — shared axis: compare absolute flow values.\n"
@@ -2284,7 +2423,7 @@ if is_compare:
         daily_chart_view = st.selectbox(
             "Chart view",
             options=CHART_VIEW_OPTIONS,
-            index=0,
+            index=2,
             key="daily_chart_view",
             help=(
                 "All series — shared axis: compare absolute flow values.\n"
@@ -2301,7 +2440,7 @@ if is_compare:
         monthly_chart_view = st.selectbox(
             "Chart view",
             options=CHART_VIEW_OPTIONS,
-            index=0,
+            index=2,
             key="monthly_chart_view",
             help=(
                 "All series — shared axis: compare absolute flow values.\n"
@@ -2320,7 +2459,7 @@ if is_compare:
         cal_month_chart_view = st.selectbox(
             "Chart view",
             options=CHART_VIEW_OPTIONS,
-            index=0,
+            index=2,
             key="cal_month_chart_view",
             help=(
                 "All series — shared axis: compare absolute flow values.\n"
@@ -2349,7 +2488,7 @@ if is_compare:
         hourly_chart_view = st.selectbox(
             "Chart view",
             options=CHART_VIEW_OPTIONS,
-            index=0,
+            index=2,
             key="hourly_chart_view",
             help=(
                 "All series — shared axis: compare absolute flow values.\n"
