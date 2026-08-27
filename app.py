@@ -2206,7 +2206,7 @@ map_opacities = [0.98 if active else 0.55 for active in map_active]
 
 fig_map = go.Figure()
 fig_map.add_trace(
-    go.Scattermapbox(
+    go.Scattermap(
         lat=map_lats,
         lon=map_lons,
         mode="markers",
@@ -2216,7 +2216,7 @@ fig_map.add_trace(
     )
 )
 fig_map.add_trace(
-    go.Scattermapbox(
+    go.Scattermap(
         lat=map_lats,
         lon=map_lons,
         mode="markers",
@@ -2230,7 +2230,7 @@ fig_map.add_trace(
     )
 )
 fig_map.add_trace(
-    go.Scattermapbox(
+    go.Scattermap(
         lat=map_lats,
         lon=map_lons,
         mode="markers",
@@ -2247,7 +2247,7 @@ fig_map.add_trace(
 )
 for point in map_points:
     fig_map.add_trace(
-        go.Scattermapbox(
+        go.Scattermap(
             lat=[point["display_lat"]],
             lon=[point["display_lon"]],
             mode="text",
@@ -2259,7 +2259,7 @@ for point in map_points:
         )
     )
 fig_map.update_layout(
-    mapbox=dict(
+    map=dict(
         style="carto-positron",
         center=dict(lat=51.3, lon=-3.0),
         zoom=6.6,
